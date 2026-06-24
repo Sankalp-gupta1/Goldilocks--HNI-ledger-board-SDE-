@@ -1,214 +1,331 @@
-# HNI Accounting System
+# Goldilocks HNI Ledger Intelligence Platform
 
-A lightweight, end-to-end financial analysis system that transforms raw bank statements into structured accounting outputs including Income Statement, Balance Sheet, and transaction-level traceability.
+## Enterprise-Grade Financial Intelligence & Automated Accounting Engine
 
-Designed for high-net-worth individuals and advanced personal finance tracking, the system combines rule-based logic with machine learning to ensure accurate financial classification and reporting.
+Goldilocks HNI Ledger is a comprehensive financial intelligence platform designed to convert unstructured bank statements into fully traceable accounting records, financial statements, cash-flow analytics, and net-worth reports.
 
----
+Unlike traditional personal finance applications that merely categorize transactions, the platform applies accounting logic, ledger construction, financial classification, reconciliation workflows, and statement generation to build a complete financial picture for High Net-Worth Individuals (HNIs), professionals, consultants, business owners, and family offices.
 
-## Core Features
-
-### 1. Bank Statement Parsing
-
-* Supports Excel (.xlsx, .xls) and PDF uploads
-* Handles multiple bank formats (HDFC, ICICI, Axis, SBI, AU, IDFC)
-* Multi-stage PDF parsing pipeline:
-
-  * Table extraction using pdfplumber
-  * Structured text parsing fallback
-  * pdfminer / PyMuPDF fallback
-  * OCR support for scanned PDFs using Tesseract
+The system acts as an intelligent accounting layer between raw banking data and decision-ready financial reports.
 
 ---
 
-### 2. Intelligent Transaction Classification
+# Key Capabilities
 
-* Hybrid classification engine:
+### Multi-Bank Statement Intelligence
 
-  * Rule-based classification (UPI, NEFT, ACH, merchant patterns)
-  * Machine learning fallback (TF-IDF + LinearSVC)
+The platform supports ingestion of bank statements from multiple institutions and formats.
 
-* Automatically detects:
+Supported Inputs:
 
-  * Income vs Expense
-  * Investment flows
-  * Transfers and internal movements
-  * Charges and financial costs
+* PDF Statements
+* XLS / XLSX Statements
+* Password Protected Statements
+* Multi-page Banking PDFs
+* Scanned Banking Documents
 
----
+Supported Banks:
 
-### 3. Review & Approve Workflow
-
-* All transactions are staged before final posting
-
-* Interactive UI enables:
-
-  * Reclassification
-  * Manual correction
-  * Rule creation
-
-* Ensures accuracy and user validation before financial reporting
+* HDFC Bank
+* ICICI Bank
+* SBI
+* Axis Bank
+* PNB
+* Union Bank
+* AU Bank
+* IDFC First Bank
+* Additional formats can be integrated through modular parsers
 
 ---
 
-### 4. Financial Statement Generation
+# Advanced Financial Classification Engine
 
-#### Income Statement
+The classification engine automatically converts raw transactions into structured accounting entries.
 
-* Salary, interest, dividends
-* Capital gains
-* Categorized operating expenses
+### Rule-Based Classification
 
-#### Balance Sheet
+Recognizes:
 
-* Investments (Equity, Mutual Funds, Fixed Deposits)
-* Current assets (bank balance, receivables, transfers)
-* Liabilities (loans, overdrafts, payables)
+* UPI Transactions
+* IMPS
+* NEFT
+* RTGS
+* ACH Debits
+* Interest Credits
+* Salary Credits
+* Merchant Payments
+* Internal Transfers
+* Investments
+* Family Transfers
+* Trading Cash Flows
 
-#### Trading Account Treatment
+### Machine Learning Classification
 
-The trading account is dynamically classified based on net position:
+A fallback ML engine is used when deterministic rules fail.
 
-* Net positive → shown as **Asset (Receivable)**
-* Net negative → shown as **Liability (Payable)**
-* Net zero → not displayed
+Technologies:
 
-This ensures correct financial representation based on actual cash flows.
+* TF-IDF Vectorization
+* Linear Support Vector Classifier (LinearSVC)
+* Confidence Scoring
+* Auto-Learning Dataset Generation
 
----
-
-### 5. Traceability (Key Feature)
-
-Every reported figure is fully traceable to:
-
-* Individual transactions
-* Source narration
-* Classification logic
-
-This ensures transparency and auditability across all outputs.
+The hybrid architecture ensures both accuracy and scalability.
 
 ---
 
-## Tech Stack
+# Three Book Accounting Architecture
 
-* Backend: Python
-* Database: SQLite
-* Frontend: HTML + JavaScript (served via Python HTTP server)
-* Machine Learning: scikit-learn (TF-IDF + LinearSVC)
+The platform automatically creates a complete accounting structure.
 
-### Parsing Libraries
+## Book I — Income & Expenditure
 
-* pandas, openpyxl, xlrd
-* pdfplumber, pdfminer.six, PyMuPDF
-* pytesseract (OCR support)
+Captures:
 
----
+* Salary
+* Professional Income
+* Interest Income
+* Dividend Income
+* Rental Income
+* Capital Gains
+* Household Expenses
+* Utility Payments
+* Education Expenses
+* Lifestyle Expenses
 
-## Project Structure
+Generates:
 
-```
-.
-├── hni_accounting_system.py       # Main server and core logic
-├── hni_ledger_extension.py        # Ledger and classification logic
-├── generate_dataset.py            # Dataset generation for ML training
-├── requirements.txt               # Dependencies
-├── README.md
-├── .gitignore
-```
+* Income Statement
+* Profit & Loss View
+* Surplus / Deficit Calculation
 
 ---
 
-## Setup Instructions
+## Book II — Balance Sheet
 
-### 1. Install dependencies
+Tracks true assets and liabilities.
 
-```
-pip install -r requirements.txt
-```
+Assets:
 
----
+* Bank Balances
+* Fixed Deposits
+* Investments
+* Loans Given
+* Trading Receivables
+* Advances Recoverable
 
-### 2. Install OCR (for scanned PDFs)
+Liabilities:
 
-```
-brew install tesseract            # macOS
-sudo apt install tesseract-ocr    # Linux
-```
+* Loans
+* Credit Obligations
+* Outstanding Payables
+* Trading Payables
 
----
+Generates:
 
-### 3. Run the application
-
-```
-python hni_accounting_system.py
-```
-
----
-
-### 4. Access the UI
-
-```
-http://localhost:8082
-```
+* Personal Balance Sheet
+* Net Worth Statement
+* Asset Allocation Snapshot
 
 ---
 
-## Important Notes
+## Book III — Balance Verification Layer
 
-### Database
+A dedicated balancing engine continuously validates:
 
-* SQLite database is created locally at runtime
-* `.db` files are excluded from the repository to prevent exposure of sensitive financial data
+Assets = Liabilities + Equity
 
----
+The system automatically detects:
 
-### Machine Learning Model
+* Missing entries
+* Unexplained balances
+* Reconciliation gaps
+* Classification inconsistencies
 
-* The trained model (`.joblib`) is not included in the repository
-* It is generated locally during runtime or training
-
----
-
-### Data Privacy
-
-* All processing is local
-* No external APIs are used
-* Users should ensure sensitive financial data is not committed to version control
+This creates audit-grade financial integrity.
 
 ---
 
-## Known Limitations
+# Review & Approval Workflow
 
-* Some transactions may fall into **Suspense** due to noisy or incomplete narrations
-* Counterparty extraction may fail for certain bank-specific formats
-* Broker and trading-related transactions may require manual validation
-* Duplicate detection may occasionally trigger incorrectly
+Before posting transactions into the ledger:
 
----
+1. Transactions are staged
+2. Classifications are reviewed
+3. Rules can be corrected
+4. New rules can be created
+5. Entries are approved
+6. Ledger posting occurs
 
-## Future Improvements
-
-* Improved narration cleaning and tokenization
-* Enhanced counterparty extraction using hybrid regex + ML
-* Smarter duplicate detection using hashing
-* Stronger reconciliation between Income Statement and Balance Sheet
-* UI optimization for large datasets
+This human-in-the-loop workflow dramatically improves classification quality.
 
 ---
 
-## Author
+# Trading Cash Flow Intelligence
 
-Developed as a financial intelligence and accounting system focused on:
+One of the most advanced modules in the platform.
 
-* Accuracy
-* Transparency
-* Traceability
-* Real-world financial logic
+The system identifies:
+
+* Broker Deposits
+* Broker Withdrawals
+* Trading Capital Introduced
+* Capital Withdrawn
+* Trading Receivables
+* Trading Payables
+
+Net Position Logic:
+
+Positive Position:
+Trading Receivable → Asset
+
+Negative Position:
+Trading Payable → Liability
+
+This ensures financial statements reflect actual economic reality.
 
 ---
 
-## License
+# Complete Transaction Traceability
 
-This project is intended for educational and personal use. Add an appropriate license if distributing publicly.
+Every figure shown in reports can be traced back to:
 
+* Source Statement
+* Original Narration
+* Transaction Date
+* Counterparty
+* Classification Rule
+* Ledger Entry
 
+This creates full transparency across the accounting pipeline.
+
+---
+
+# Financial Reporting Suite
+
+The platform automatically generates:
+
+### Income Statement
+
+* Income Categories
+* Expense Categories
+* Net Income
+
+### Balance Sheet
+
+* Assets
+* Liabilities
+* Equity
+* Net Worth
+
+### Profit & Loss Statement
+
+* Operating Performance
+* Surplus Analysis
+
+### Consolidated Ledger Report
+
+* Account Wise View
+* Combined View
+* Traceable Entries
+
+### Statement Analytics
+
+* Year-wise Reports
+* Account-wise Reports
+* Transaction Drilldowns
+
+---
+
+# Technology Stack
+
+Backend
+
+* Python 3
+* SQLite
+
+Data Processing
+
+* Pandas
+* NumPy
+* OpenPyXL
+
+PDF Processing
+
+* pdfplumber
+* PyMuPDF
+* pdfminer.six
+* Tesseract OCR
+
+Machine Learning
+
+* Scikit-Learn
+* TF-IDF
+* LinearSVC
+
+Frontend
+
+* HTML
+* CSS
+* Vanilla JavaScript
+
+Architecture
+
+* Single File Financial Engine
+* Modular Ledger Extensions
+* Rule-Based + ML Hybrid Classification
+
+---
+
+# System Highlights
+
+✔ Multi-Bank Statement Parsing
+
+✔ Automated Ledger Construction
+
+✔ Income Statement Generation
+
+✔ Balance Sheet Generation
+
+✔ Trading Cash Flow Accounting
+
+✔ Net Worth Computation
+
+✔ Review & Approval Workflow
+
+✔ Machine Learning Assisted Classification
+
+✔ Counterparty Extraction
+
+✔ Financial Traceability Engine
+
+✔ Audit-Oriented Architecture
+
+✔ Fully Local Processing
+
+✔ No External Financial APIs
+
+---
+
+# Future Roadmap
+
+* AI Assisted Financial Review
+* Natural Language Financial Queries
+* Family Office Consolidation
+* Portfolio Tracking
+* Capital Gains Automation
+* GST & Tax Mapping
+* Broker Contract Note Processing
+* Multi-Entity Accounting
+* Financial Risk Analytics
+* Wealth Intelligence Dashboard
+
+---
+
+# Author
+
+Sankalp Gupta
+
+Software Engineer | AI Engineer | Financial Systems Developer
+
+Focused on building intelligent systems that combine Artificial Intelligence, Financial Analytics, Accounting Logic, and Real-World Automation into production-grade software solutions.

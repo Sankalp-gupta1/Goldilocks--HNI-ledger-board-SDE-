@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+
+# Database
+*.db
+*.sqlite3
+*.db-journal
+
+# Logs
+*.log
+output.log
+
+# ML models
+*.joblib
+*.pkl
+
+# Generated datasets
+dataset_high_precision.csv
+dataset_augmentation.csv
+dataset_combined.csv
+
+# User-generated / runtime files
+user_corrections.csv
+uploaded_files/
+
+# OS files
+.DS_Store
+
+# Environment
+.env
+venv/
+.env/
+
+# IDE
+.vscode/
+.idea/

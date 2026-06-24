@@ -11136,9 +11136,9 @@ def main():
     _current_user_id = None
     print("  No active user. Please log in from Setup.")
 
-    port = 8082
+    port = int(os.environ.get("PORT", 8082))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"\n  ✅ Server → http://localhost:{port}")
+    print(f"\n  ✅ Server → http://0.0.0.0:{port}")
     print("  Press Ctrl+C to stop\n")
     try:
         server.serve_forever()

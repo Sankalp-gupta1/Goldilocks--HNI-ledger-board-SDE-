@@ -16,6 +16,8 @@ The version 2 startup command remains compatible. In production it starts Gunico
 
 The upgraded Docker service is [goldilocks-workspace.onrender.com](https://goldilocks-workspace.onrender.com). It tracks the `ledger-workspace-upgrade` branch and uses Render Free, one instance and `HNI_STORAGE_MODE=ephemeral`. Tesseract is installed in the container. The application shows a temporary-storage warning before login and inside the workspace.
 
+The service reports `autoDeploy=yes`, but no deployment followed the branch update during release. A manual deploy was therefore used after confirming no deployment was queued. Render documents that public-repository URL services need manual deploys until a Git provider is connected; do not assume a push is live.
+
 This is an isolated release; it does not copy or expose records from the old service. Accounts on the old URL are not automatically accounts on the new URL. Use fictional files until a permanent disk is attached and verified.
 
 The release/documentation merge uses Render's `[skip render]` commit marker to avoid restarting either service just for repository housekeeping. Future deployment changes should follow the backup procedure below. Source code and paid infrastructure configuration are in `main`; the live service branch is named above.

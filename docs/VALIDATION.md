@@ -19,7 +19,19 @@ Audit/test date: **28 October 2026**.
 - **The full Playwright browser workflow passed** against the real API: signup, recovery-code acknowledgement, sample import, batch approval, ledger search, original evidence, PDF download, multipart file upload, personal rule, settings, mobile navigation and sign-out.
 - Desktop and mobile screenshots are saved in `docs/screenshots/`.
 - `render.yaml` passed the current official Render JSON Schema. Platform-aware CLI validation has not been run; the Blueprint has not been applied.
-- Docker is not available in the local executor. The container build must also pass on the deployment host.
+- Docker was unavailable locally. The multi-stage Docker build passed on Render, and the live health endpoint confirms Tesseract is available.
+
+## GitHub and live release
+
+- Both push and pull-request GitHub Actions checks passed. [Verified workflow](https://github.com/Sankalp-gupta1/Goldilocks--HNI-ledger-board-SDE-/actions/runs/40731907237).
+- Live application: **https://goldilocks-workspace.onrender.com**.
+- Render service: `srv-dbh2h4bl550s73eq0li0`; Docker, Free plan, one instance.
+- The initial release `558255ed48ba4f104efd52487c8fcb76fc92eae6` became live in deploy `dep-dbh2h53l550s73eq0mo0`.
+- The full browser workflow passed against that public HTTPS URL, including real signup, source import, posting, evidence, PDF download, mobile navigation and logout.
+- A separate live check created two fictional accounts. The second could not read the first account's queue, transaction evidence or original file. Anonymous reads returned 401; a mutation without the required header returned 403.
+- Live posting produced balanced journals and expected income/expenditure; original-file bytes matched the uploaded fixture. Secure, HttpOnly and SameSite cookie flags were confirmed, and logout revoked both sessions.
+- Browser verification used the executor's network proxy. Its embedded Chromium required a local certificate-trust override; independent HTTPS requests succeeded with normal system certificate validation. No certificate bypass exists in the application.
+- A small banner/sidebar overlap discovered during the live visual check was fixed in `4bd1dde86647872040b18af087c1733a10b58dd2`. Render deploy `dep-dbh2mpou01pc73avqq8g` reached `live` on 28 October 2026 at 22:36 IST with that exact commit. The served HTML references the newly built CSS asset, and the HTTPS health check succeeds. The full live Playwright workflow was then rerun and passed again; the committed desktop/mobile screenshots come from this final deployment.
 
 ## Hosting boundary
 

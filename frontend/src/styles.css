@@ -3330,8 +3330,27 @@ progress::-moz-progress-bar {
   position: relative;
   z-index: 45;
 }
-.app-shell:has(.host-warning) {
+.host-warning + .app-shell {
   min-height: calc(100vh - 40px);
+}
+.host-warning:has(+ .app-shell) {
+  margin-left: 228px;
+  z-index: 20;
+}
+@media (min-width: 1500px) {
+  .host-warning:has(+ .app-shell) {
+    margin-left: 246px;
+  }
+}
+@media (max-width: 1150px) {
+  .host-warning:has(+ .app-shell) {
+    margin-left: 205px;
+  }
+}
+@media (max-width: 640px) {
+  .host-warning:has(+ .app-shell) {
+    margin-left: 0;
+  }
 }
 
 /* Keep working text readable at normal desktop zoom. */

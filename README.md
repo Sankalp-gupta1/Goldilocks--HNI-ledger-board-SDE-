@@ -2,9 +2,9 @@
 
 A bank statement tells you what moved. Goldilocks helps you understand **why it moved**, check the accounting, and follow every posted entry back to its source.
 
-**Existing deployment:** [Open Goldilocks](https://goldilocks-hni-ledger-board-sde.onrender.com)
+**Live version 2:** [Open Goldilocks](https://goldilocks-workspace.onrender.com) · [Release checks](docs/VALIDATION.md)
 
-> Release note: version 2 is a complete React workspace and an authenticated Python API. The existing Render service uses a **free, temporary filesystem**. Its URL is not proof that version 2 has been released or that records are durable. See [deployment status and checks](docs/VALIDATION.md) before uploading real financial documents.
+> Hosting note: the live version runs the real Python API and React workspace on Render Free. **Its storage is temporary:** accounts and records can disappear when the host restarts or sleeps. Use fictional files on this public deployment. For lasting records, use the documented Docker volume or paid persistent-disk setup. The old server was left untouched to protect any existing records.
 
 ![Goldilocks workspace, populated with explicitly fictional sample transactions](docs/screenshots/dashboard.png)
 

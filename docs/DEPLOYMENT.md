@@ -12,6 +12,14 @@ On 28 October 2026 the connected Render workspace reported:
 
 The version 2 startup command remains compatible. In production it starts Gunicorn, and the built React files are served from `web/`. This does **not** solve ephemeral storage by itself.
 
+## Version 2 public deployment
+
+The upgraded Docker service is [goldilocks-workspace.onrender.com](https://goldilocks-workspace.onrender.com). It tracks the `ledger-workspace-upgrade` branch and uses Render Free, one instance and `HNI_STORAGE_MODE=ephemeral`. Tesseract is installed in the container. The application shows a temporary-storage warning before login and inside the workspace.
+
+This is an isolated release; it does not copy or expose records from the old service. Accounts on the old URL are not automatically accounts on the new URL. Use fictional files until a permanent disk is attached and verified.
+
+The release/documentation merge uses Render's `[skip render]` commit marker to avoid restarting either service just for repository housekeeping. Future deployment changes should follow the backup procedure below. Source code and paid infrastructure configuration are in `main`; the live service branch is named above.
+
 ## Durable deployment
 
 Use the included Dockerfile: it installs Python dependencies and Tesseract, builds React and runs the app as a non-root user. Use one service instance.

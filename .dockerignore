@@ -1,0 +1,11 @@
+.git
+.venv*
+**/node_modules
+**/__pycache__
+**/test-results
+**/playwright-report
+.env*
+*.db*
+data
+uploaded_files
+web

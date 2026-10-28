@@ -45,13 +45,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
 from flask import jsonify
 
-# Never log private financial narrations from legacy helper diagnostics.
-def print(*args, **kwargs):
-    return None
-
-
 _EXT_HERE = os.path.dirname(os.path.abspath(__file__))
-_UPLOAD_STORE_DIR = os.environ.get("HNI_UPLOAD_DIR", os.path.join(_EXT_HERE, "uploaded_files"))
+_UPLOAD_STORE_DIR = os.path.join(_EXT_HERE, "uploaded_files")
 
 
 def _safe_upload_ext(file_name: str) -> str:
@@ -702,9 +697,9 @@ def extend_db(db_store) -> None:
     # ── 4. Indexes ────────────────────────────────────────────────────────
     _try("CREATE INDEX IF NOT EXISTS idx_pending_uid    ON pending_ledger(user_id)")
     _try("CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_ledger(status)")
-    # File hash + source occurrence fingerprints replace lossy business-field uniqueness.
-    _try("DROP INDEX IF EXISTS ux_ledger_dedupe")
-    _try("DROP INDEX IF EXISTS ux_pending_dedupe")
+    # Keep old unique indexes for backwards compatibility
+    _try("CREATE UNIQUE INDEX IF NOT EXISTS ux_ledger_dedupe ON ledger(user_id, account_id, txn_date, narration, amount, txn_type, counterparty, source)")
+    _try("CREATE UNIQUE INDEX IF NOT EXISTS ux_pending_dedupe ON pending_ledger(user_id, txn_date, narration, amount, txn_type, counterparty, source)")
 
     # ── 4. Trading ledger (broker account — 5paisa / Zerodha etc.) ───────────
     _try(
@@ -808,8 +803,36 @@ def extend_db(db_store) -> None:
     )
     _try("CREATE INDEX IF NOT EXISTS idx_user_known_accounts_user_id ON user_known_accounts(user_id)")
 
-    # Never delete similar-looking historical rows during startup.
-    # Two same-day equal-value payments can both be legitimate.
+    # ── 5. Self-heal old duplicate ledger rows created by duplicate-batch restaging ──
+    try:
+        dup_groups = cur.execute(
+            """SELECT user_id, account_id, txn_date, narration, amount, txn_type, COUNT(*) AS cnt
+                   FROM ledger
+                  GROUP BY user_id, account_id, txn_date, narration, amount, txn_type
+                 HAVING COUNT(*) > 1"""
+        ).fetchall()
+        removed = 0
+        for g in dup_groups:
+            rows = cur.execute(
+                """SELECT id, source, created_at,
+                          CASE WHEN LOWER(COALESCE(source,''))='restaged' THEN 1 ELSE 0 END AS restaged_rank,
+                          CASE WHEN LOWER(COALESCE(source,'')) IN ('excel','upload','manual','review') THEN 0 ELSE 1 END AS source_rank
+                     FROM ledger
+                    WHERE user_id=? AND account_id=? AND txn_date=? AND narration=? AND amount=? AND txn_type=?
+                 ORDER BY source_rank, restaged_rank, created_at, id""",
+                (g['user_id'], g['account_id'], g['txn_date'], g['narration'], g['amount'], g['txn_type'])
+            ).fetchall()
+            keep_id = rows[0]['id']
+            delete_ids = [r['id'] for r in rows[1:]]
+            if delete_ids:
+                cur.executemany("DELETE FROM ledger WHERE id=?", [(x,) for x in delete_ids])
+                removed += len(delete_ids)
+        if removed:
+            conn.commit()
+            print(f"  ✅ HNI Extension: removed {removed} duplicate ledger row(s).")
+    except Exception as e:
+        print(f"  ⚠️ HNI Extension duplicate cleanup skipped: {e}")
+
     conn.close()
     print("  ✅ HNI Extension: schema migration complete.")
 
@@ -1788,9 +1811,8 @@ class ExtendedDBStore:
     # ── Helpers ──────────────────────────────────────────────────────────────
 
     def _conn(self) -> sqlite3.Connection:
-        c = sqlite3.connect(self._db.db_path, check_same_thread=False, timeout=15, factory=__import__("hni_accounting_system").ClosingConnection)
+        c = sqlite3.connect(self._db.db_path, check_same_thread=False, isolation_level=None)
         c.row_factory = sqlite3.Row
-        c.execute("PRAGMA foreign_keys=ON")
         return c
 
     def _get_pending_by_id(self, txn_id: str) -> Optional[Dict]:

@@ -11,7 +11,7 @@ DOUBLE-ENTRY LEDGER (3 books):
   Book 1 — BALANCE SHEET (Assets / Liabilities / Equity)
     • Assets    : What you OWN  (investments, loans given, land, FDs, receivables)
     • Liabilities: What you OWE  (long-term loans, credit card outstanding)
-    • Equity    : Net Worth = Assets − Liabilities
+    • Equity    : Net Worth = Assets − Liabilities + Retained Earnings
 
   Book 2 — INCOME & EXPENDITURE (P&L)
     • Income    : Salary, Dividend, Capital Gains, Interest, Professional
@@ -24,10 +24,10 @@ DOUBLE-ENTRY LEDGER (3 books):
     • Investment purchases / redemptions
 
 CLASSIFICATION SOURCES:
-  Step 0  → Private reviewed examples and personal rules in goldilocks/service.py
+  Step 0  → Excel ground-truth lookup (if narration matches training data exactly)
   Step 1  → Rule engine (regex patterns, high confidence)
-  Step 2  → Supervised ML (TF-IDF + LinearSVC, trained on authored synthetic examples)
-  Step 3  → Unclassified review when evidence is insufficient
+  Step 2  → Supervised ML (TF-IDF + LinearSVC, trained on Excel data)
+  Step 3  → Unsupervised KMeans fallback / anomaly detection
 ═══════════════════════════════════════════════════════════════════════
 """
 from __future__ import annotations
@@ -41,22 +41,17 @@ import pandas as pd
 import hashlib
 import hmac
 import secrets
-import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 
-# Legacy engine diagnostics can include narrations: keep them out of server logs.
-def print(*args, **kwargs):
-    return None
+print("LIVE MARKER SYSTEM 2026-04-10 16:11", flush=True)
 
-
+warnings.filterwarnings("ignore")
 
 _HERE        = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.environ.get("HNI_DATA_DIR", os.path.join(_HERE, "data"))
-os.makedirs(DATA_DIR, exist_ok=True)
-_legacy_db = os.path.join(_HERE, "hni_ledger.db")
-DB_PATH = os.environ.get("HNI_DB_PATH", _legacy_db if os.path.exists(_legacy_db) else os.path.join(DATA_DIR, "hni_ledger.db"))
-MODEL_PATH = os.path.join(DATA_DIR, "synthetic_classifier_v2.joblib")
-CLUSTER_PATH = os.path.join(DATA_DIR, "synthetic_clusters_v2.joblib")
+DB_PATH      = os.path.join(_HERE, "hni_ledger.db")
+MODEL_PATH   = os.path.join(_HERE, "model_ledger.joblib")
+CLUSTER_PATH = os.path.join(_HERE, "cluster_ledger.joblib")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -74,8 +69,6 @@ CLUSTER_PATH = os.path.join(DATA_DIR, "synthetic_clusters_v2.joblib")
 # ══════════════════════════════════════════════════════════════════════════════
 
 LEDGER_MAP = {
-    "exp_rent": ("INCOME_EXPENSE", "Expenditure", "Home & Property", "Rent paid"),
-    "exp_loan_interest": ("INCOME_EXPENSE", "Expenditure", "Financial Costs", "Loan interest paid"),
 
     # ─── BALANCE SHEET : ASSETS ──────────────────────────────────────────────
     # Current Assets — things that convert to cash within 12 months
@@ -3007,38 +3000,84 @@ class SupervisedModel:
         self._load_or_train()
 
     def _load_or_train(self):
-        """Train reproducibly on fictional examples; never pool users' statements."""
         if os.path.exists(MODEL_PATH):
-            saved = joblib.load(MODEL_PATH)
-            self.vectorizer, self.model, self.labels = saved["vectorizer"], saved["model"], saved["labels"]
-            self.ready = True
+            try:
+                b = joblib.load(MODEL_PATH)
+                self.vectorizer = b["vectorizer"]
+                self.model = b["model"]
+                self.labels = b["labels"]
+                self.ready = True
+                print(f"  ✅ ML model loaded — {len(self.labels)} categories")
+                return
+            except Exception as e:
+                print(f"  ⚠️ Model load error: {e}")
+
+        # Build training data from Excel
+        EXCEL = "/mnt/user-data/uploads/BalanceSheet_Classified_MANI_GARG__1_.xlsx"
+        X, y = [], []
+
+        if os.path.exists(EXCEL):
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(EXCEL, data_only=True)
+                ws = wb["BS Classified Transactions"]
+                for row in ws.iter_rows(values_only=True):
+                    if not row[0] or not str(row[0]).strip().isdigit():
+                        continue
+                    narr = str(row[2]).strip()
+                    line_item = str(row[7]).strip()
+                    mapped = EXCEL_LINE_TO_KEY.get(line_item)
+                    if narr and mapped:
+                        # Augment: repeat 3× to weight real data higher
+                        X.extend([narr]*3); y.extend([mapped]*3)
+                print(f"  📊 Loaded {len(X)//3} training samples from Excel")
+            except Exception as e:
+                print(f"  ⚠️ Excel load error: {e}")
+
+        # Also load dataset.csv if present
+        dataset = os.path.join(_HERE, "dataset.csv")
+        if os.path.exists(dataset):
+            with open(dataset, encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    d = (row.get("description") or "").strip()
+                    c = (row.get("category") or "").strip()
+                    if d and c:
+                        mapped = CAT_TO_KEY.get(c, c)
+                        if mapped in LEDGER_MAP:
+                            X.append(d); y.append(mapped)
+
+        # Load user corrections (highest weight — repeat 5×)
+        corrections_path = os.path.join(_HERE, "user_corrections.csv")
+        if os.path.exists(corrections_path):
+            with open(corrections_path, encoding="utf-8") as f:
+                for row in csv.DictReader(f, fieldnames=["description", "category"]):
+                    d = (row.get("description") or "").strip()
+                    c = (row.get("category") or "").strip()
+                    if d and c and c in LEDGER_MAP:
+                        X.extend([d] * 5); y.extend([c] * 5)
+
+        if len(X) < 10:
+            print("  ⚠️ Insufficient training data — ML disabled")
             return
-        from generate_dataset import SPECS, make_row
-        import random
+
+        print(f"  🔄 Training ML on {len(X)} samples …")
         from sklearn.feature_extraction.text import TfidfVectorizer
         from sklearn.svm import LinearSVC
         from sklearn.calibration import CalibratedClassifierCV
-        rng_state = random.getstate()
-        random.seed(42)
-        X, y = [], []
-        try:
-            for category, spec in SPECS.items():
-                key = CAT_TO_KEY.get(category, category)
-                if key not in LEDGER_MAP:
-                    continue
-                for _ in range(60):
-                    example = make_row(category, spec)
-                    X.append(example.description); y.append(key)
-        finally:
-            random.setstate(rng_state)
-        vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(3,5), max_features=25000)
-        model = CalibratedClassifierCV(LinearSVC(class_weight="balanced", random_state=42, max_iter=5000), cv=3)
-        model.fit(vec.fit_transform(X), y)
-        self.vectorizer, self.model, self.labels = vec, model, list(model.classes_)
-        self.ready = True
-        # File contains only a model trained on authored synthetic examples.
-        joblib.dump({"vectorizer":vec,"model":model,"labels":self.labels}, MODEL_PATH)
 
+        vec = TfidfVectorizer(lowercase=True, analyzer="char_wb",
+                              ngram_range=(3, 5), min_df=1, max_features=200000)
+        Xtr = vec.fit_transform(X)
+        base = LinearSVC(class_weight="balanced", max_iter=3000)
+        model = CalibratedClassifierCV(estimator=base, method="sigmoid", cv=min(3, len(set(y))))
+        model.fit(Xtr, y)
+
+        self.vectorizer = vec
+        self.model = model
+        self.labels = list(model.classes_)
+        self.ready = True
+        joblib.dump({"vectorizer": vec, "model": model, "labels": self.labels}, MODEL_PATH)
+        print(f"  ✅ ML trained — {len(self.labels)} categories")
 
     def predict(self, text: str) -> Tuple[str, float]:
         if not self.ready:
@@ -3048,9 +3087,15 @@ class SupervisedModel:
         idx = int(proba.argmax())
         return self.labels[idx], float(proba[idx])
 
-    def add_correction(self, narration, correct_key):
-        """Personal corrections live in the user-scoped learning_examples table."""
-        return None
+    def add_correction(self, narration: str, correct_key: str) -> None:
+        """Persist a user reclassification and retrain incrementally."""
+        if not self.ready:
+            return
+        corrections_path = os.path.join(_HERE, "user_corrections.csv")
+        with open(corrections_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([narration.strip(), correct_key.strip()])
+        self._load_or_train()
 
 class UnsupervisedClusters:
     def __init__(self):
@@ -3072,7 +3117,7 @@ class UnsupervisedClusters:
             except Exception:
                 pass
 
-        EXCEL = ""  # Private workbooks are never shared model-training inputs.
+        EXCEL = "/mnt/user-data/uploads/BalanceSheet_Classified_MANI_GARG__1_.xlsx"
         X_text, y_cat = [], []
         if os.path.exists(EXCEL):
             try:
@@ -3129,18 +3174,15 @@ class UnsupervisedClusters:
 
 _ml: Optional[SupervisedModel] = None
 _cl: Optional[UnsupervisedClusters] = None
-_model_lock = threading.RLock()
 
 def get_ml():
     global _ml
-    with _model_lock:
-        if _ml is None: _ml = SupervisedModel()
+    if _ml is None: _ml = SupervisedModel()
     return _ml
 
 def get_cl():
     global _cl
-    with _model_lock:
-        if _cl is None: _cl = UnsupervisedClusters()
+    if _cl is None: _cl = UnsupervisedClusters()
     return _cl
 
 
@@ -3373,41 +3415,14 @@ def _infer_type(u: str) -> str:
 # DATABASE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _hash_password(password: str) -> str:
-    password = str(password or "")
-    salt = os.urandom(16)
-    iterations = 200000
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
-    return f"pbkdf2_sha256${iterations}${salt.hex()}${dk.hex()}"
-
-def _verify_password(password: str, stored: str) -> bool:
-    try:
-        algo, iter_s, salt_hex, hash_hex = str(stored or "").split("$", 3)
-        if algo != "pbkdf2_sha256":
-            return False
-        iterations = int(iter_s)
-        salt = bytes.fromhex(salt_hex)
-        expected = bytes.fromhex(hash_hex)
-        actual = hashlib.pbkdf2_hmac("sha256", str(password or "").encode("utf-8"), salt, iterations)
-        return hmac.compare_digest(actual, expected)
-    except Exception:
-        return False
-
-class ClosingConnection(sqlite3.Connection):
-    def __exit__(self, exc_type, exc_value, traceback):
-        try:return super().__exit__(exc_type, exc_value, traceback)
-        finally:self.close()
-
 class DBStore:
     def __init__(self, db_path=DB_PATH):
         self.db_path = db_path
         self._init()
 
     def _conn(self):
-        c = sqlite3.connect(self.db_path, check_same_thread=False, factory=ClosingConnection)
+        c = sqlite3.connect(self.db_path, check_same_thread=False)
         c.row_factory = sqlite3.Row
-        c.execute("PRAGMA busy_timeout=15000")
-        c.execute("PRAGMA foreign_keys=ON")
         return c
 
     def _init(self):
@@ -3428,7 +3443,8 @@ class DBStore:
                 CREATE INDEX IF NOT EXISTS idx_uid   ON ledger(user_id);
                 CREATE INDEX IF NOT EXISTS idx_book  ON ledger(book);
                 CREATE INDEX IF NOT EXISTS idx_date  ON ledger(txn_date);
-                DROP INDEX IF EXISTS ux_ledger_dedupe;
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_ledger_dedupe
+                ON ledger(user_id, account_id, txn_date, narration, amount, txn_type, counterparty, source);
             """)
 
     def upsert_user(self, uid, name, email="", phone=""):
@@ -7075,18 +7091,4060 @@ def generate_ledger_report(db: DBStore, user_id: str) -> str:
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# The web boundary lives in goldilocks/app.py. No process-global signed-in user.
+_db = DBStore(DB_PATH)
+_current_user_id: Optional[str] = None
+
+HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HNI Ledger v0655</title>
+<!-- BUILD:20260331_065500 -->
+<style>
+
+:root{--blue:#1565c0;--green:#1b5e20;--red:#b71c1c;--amber:#f57f17;--teal:#004d40;
+  --bg:#f0f2f5;--card:#fff;--border:#dde1e7;--mono:'Courier New',monospace}
+*{box-sizing:border-box}
+body{margin:0;font-family:'Segoe UI',Arial,sans-serif;background:var(--bg);color:#1a1a2e}
+header{background:linear-gradient(135deg,#0d47a1,#1565c0,#0d47a1);color:#fff;padding:18px 28px;display:flex;align-items:center;gap:16px;box-shadow:0 2px 12px rgba(0,0,0,.2)}
+header h1{margin:0;font-size:22px;font-weight:800;letter-spacing:.5px}
+header .sub{font-size:12px;opacity:.75;margin-top:3px;letter-spacing:.3px}
+.tabs{display:flex;background:#fff;border-bottom:2px solid var(--border);padding:0 28px;gap:2px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.tab{padding:14px 20px;cursor:pointer;border-bottom:3px solid transparent;font-weight:700;color:#777;font-size:13px;transition:.15s;letter-spacing:.3px}
+.tab.active{color:var(--blue);border-bottom-color:var(--blue)}
+.pane{display:none;padding:22px 28px}.pane.active{display:block}
+.card{
+background:rgba(255,255,255,.95);
+border-radius:18px;
+padding:22px;
+margin-bottom:18px;
+box-shadow:0 10px 30px rgba(0,0,0,.08);
+border:1px solid #e8edf5;
+backdrop-filter:blur(8px);
+}
+.card h3{margin:0 0 16px;font-size:14px;color:#333;border-bottom:1px solid #f0f0f0;padding-bottom:10px;font-weight:700;letter-spacing:.3px}
+label{font-size:12.5px;font-weight:700;color:#555;display:block;margin-bottom:5px;margin-top:12px;text-transform:uppercase;letter-spacing:.5px}
+input,select,textarea{width:100%;padding:10px 14px;border:1.5px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;outline:none;transition:border .2s;background:#fafafa}
+input:focus,select:focus,textarea:focus{border-color:var(--blue);background:#fff;box-shadow:0 0 0 3px rgba(21,101,192,.1)}
+textarea{resize:vertical;font-family:var(--mono);font-size:12px}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:10px 20px;margin:4px 4px 4px 0;border:none;border-radius:10px;font-size:13px;font-weight:800;cursor:pointer;transition:all .2s ease;letter-spacing:.3px;box-shadow:0 6px 14px rgba(0,0,0,.08)}
+.btn:hover{transform:translateY(-2px);box-shadow:0 10px 20px rgba(0,0,0,.12)}
+.bp{background:#1565c0;color:#fff}.bp:hover{background:#0d47a1}
+.bg{background:#1b5e20;color:#fff}.bg:hover{background:#145a14}
+.bo{background:#fff;color:#1565c0;border:1.5px solid #1565c0}.bo:hover{background:#e3f2fd}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+.alert{padding:12px 16px;border-radius:8px;font-size:13px;margin-bottom:14px;border-left:4px solid;font-weight:500}
+.alert-info{background:#e3f2fd;color:#1565c0;border-color:#1565c0}
+.alert-ok{background:#e8f5e9;color:#1b5e20;border-color:#1b5e20}
+.alert-err{background:#ffebee;color:#b71c1c;border-color:#b71c1c}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{background:#f5f7fa;padding:10px 12px;text-align:left;border-bottom:2px solid var(--border);font-weight:800;color:#444;white-space:nowrap;text-transform:uppercase;font-size:11px;letter-spacing:.5px}
+td{padding:9px 12px;border-bottom:1px solid #f1f3f5;vertical-align:top}
+tr:hover td{background:#f8faff}
+.badge{display:inline-block;padding:2px 9px;border-radius:10px;font-size:10.5px;font-weight:800;white-space:nowrap;letter-spacing:.3px}
+.b-bs{background:#e8f5e9;color:#1b5e20}
+.b-ie{background:#e3f2fd;color:#1565c0}
+.b-cap{background:#fff3e0;color:#e65100}
+.b-sus{background:#fce4ec;color:#880e4f}
+.b-cr{background:#e8f5e9;color:#1b5e20}
+.b-dr{background:#ffebee;color:#b71c1c}
+.book-tag{display:inline-block;padding:3px 10px;border-radius:6px;font-size:10px;font-weight:800;letter-spacing:.5px}
+.book-bs{background:#e8f5e9;color:#1b5e20}
+.book-ie{background:#e3f2fd;color:#1565c0}
+.book-cap{background:#fff8e1;color:#f57f17}
+.book-sus{background:#fce4ec;color:#880e4f}
+.drop-zone{border:2px dashed #b0bec5;border-radius:12px;padding:36px;text-align:center;cursor:pointer;background:#fafbff;transition:.2s}
+.drop-zone:hover,.drop-zone.dragover{border-color:var(--blue);background:#e8f0fe}
+.drop-zone input[type=file]{display:none}
+.stat-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:18px}
+.stat-card{background:#fff;border-radius:12px;padding:16px;text-align:center;box-shadow:0 1px 8px rgba(0,0,0,.08);border:1px solid rgba(0,0,0,.05)}
+.stat-card .val{font-size:19px;font-weight:800}
+.stat-card .lbl{font-size:11px;color:#999;margin-top:4px;text-transform:uppercase;letter-spacing:.5px}
+pre#ledger-out{background:#0d1117;color:#e6edf3;padding:20px;border-radius:12px;overflow:auto;max-height:650px;font-family:var(--mono);font-size:11.5px;line-height:1.7;white-space:pre-wrap;border:1px solid #30363d}
+.section-head{background:linear-gradient(90deg,#0d47a1,#1565c0);color:#fff;padding:11px 16px;border-radius:8px 8px 0 0;font-weight:800;font-size:13px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;user-select:none;margin-bottom:0}
+.section-body{border:1px solid #e0e0e0;border-top:none;border-radius:0 0 8px 8px;margin-bottom:12px}
+.grp-head{background:#f5f7fa;padding:9px 20px;font-weight:700;font-size:12.5px;color:#444;display:flex;justify-content:space-between;cursor:pointer;user-select:none;border-bottom:1px solid #eee}
+.acct-head{padding:8px 28px;font-weight:600;font-size:12px;color:#555;display:flex;justify-content:space-between;cursor:pointer;user-select:none;border-bottom:1px solid #f5f5f5;background:#fafbff}
+.acct-note{font-size:11px;color:#888;padding:4px 36px 8px;font-style:italic;border-bottom:1px solid #f5f5f5}
+@media(max-width:700px){.grid2,.grid3,.stat-grid{grid-template-columns:1fr}}
+/* Trace modal */
+#trace-modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9000;align-items:center;justify-content:center}
+#trace-modal-overlay.open{display:flex}
+#trace-modal{background:#fff;border-radius:14px;width:92%;max-width:900px;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 8px 40px rgba(0,0,0,.25);overflow:hidden}
+#trace-modal-head{background:linear-gradient(135deg,#0d47a1,#1565c0);color:#fff;padding:14px 20px;display:flex;justify-content:space-between;align-items:center}
+#trace-modal-head h4{margin:0;font-size:14px;font-weight:800}
+#trace-modal-close{background:none;border:none;color:#fff;font-size:20px;cursor:pointer;line-height:1;padding:0 4px}
+#trace-modal-body{padding:16px;overflow-y:auto;flex:1}
+#trace-modal-summary{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.trace-chip{background:#e3f2fd;border:1.5px solid #90caf9;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:700;color:#1565c0}
+#trace-modal-table{width:100%;border-collapse:collapse;font-size:11.5px}
+#trace-modal-table th{background:#f5f7fa;padding:8px 10px;text-align:left;border-bottom:2px solid #e0e0e0;font-weight:800;color:#444;text-transform:uppercase;font-size:10px;letter-spacing:.4px}
+#trace-modal-table td{padding:7px 10px;border-bottom:1px solid #f1f3f5;vertical-align:top}
+#trace-modal-table tr:hover td{background:#f8faff}
+</style>
+</head>
+<!-- TRACE MODAL -->
+<div id="trace-modal-overlay" onclick="if(event.target===this)closeTrace()">
+  <div id="trace-modal">
+    <div id="trace-modal-head">
+      <h4 id="trace-modal-title">Transaction Trace</h4>
+      <button id="trace-modal-close" onclick="closeTrace()">✕</button>
+    </div>
+    <div id="trace-modal-body">
+      <div id="trace-modal-summary"></div>
+      <div id="trace-modal-loading" style="text-align:center;padding:30px;color:#aaa">Loading transactions…</div>
+      <div id="trace-modal-content" style="display:none;overflow-x:auto">
+        <table id="trace-modal-table">
+          <thead><tr>
+            <th>Date</th><th>Counterparty</th><th style="text-align:right">Amount</th><th>Actions</th>
+          </tr></thead>
+          <tbody id="trace-modal-rows"></tbody>
+        </table>
+      </div>
+      <div id="trace-modal-empty" style="display:none;text-align:center;padding:30px;color:#aaa">No transactions found for this bucket.</div>
+    </div>
+  </div>
+</div>
+<body>
+<header>
+  <div style="font-size:36px">📒</div>
+  <div>
+    <h1>HNI Ledger Classifier</h1>
+    <div class="sub" id="hdr-sub">3-Book Accounting · Balance Sheet · Income &amp; Expenditure · Capital</div>
+  </div>
+</header>
+<div class="tabs">
+  <div class="tab active" onclick="tab('classify')">📋 Upload</div>
+  <div class="tab" onclick="tab('review')">🔍 Review &amp; Approve</div>
+  <div class="tab" onclick="tab('statements')">📑 Statements</div>
+  <div class="tab" onclick="tab('ledger')">📊 Ledger</div>
+  <div class="tab" onclick="tab('report')">⚖️ Full Report</div>
+  <div class="tab" onclick="tab('trading-cashflow')">💹 Trading Cash Flow</div>
+  <div class="tab" onclick="tab('setup')">⚙️ Setup</div>
+</div>
+
+<!-- CLASSIFY -->
+<div class="pane active" id="pane-classify">
+  <div id="status" class="alert alert-info">Ready — create a user in Setup, then upload a bank statement.</div>
+
+  <div class="card">
+    <h3>📂 Upload Bank Statement (.xlsx / .xls / .xlsm / .pdf)</h3>
+    <div class="drop-zone" id="dropZone" onclick="document.getElementById('xlFile').click()"
+         ondragover="event.preventDefault();this.classList.add('dragover')"
+         ondragleave="this.classList.remove('dragover')" ondrop="handleDrop(event)">
+      <!-- ── PDF SUPPORT (NEW) ── accept PDF uploads alongside Excel -->
+      <input type="file" id="xlFile" accept=".xlsx,.xls,.xlsm,.pdf" onchange="setFile(event.target.files[0])">
+      <div style="font-size:44px;margin-bottom:10px">📄</div>
+      <p style="font-weight:700;margin:0 0 6px">Click to upload or drag &amp; drop</p>
+      <small style="color:#888">HDFC / ICICI / Axis / SBI / Union Bank / PNB statement supported · Auto-classifies into 3-book ledger</small>
+    </div>
+    <div id="file-preview" style="display:none;margin-top:10px;padding:10px 16px;background:#f5f7fa;border-radius:8px;font-size:13px"></div>
+    <div class="grid2" style="margin-top:14px">
+      <div>
+        <label style="font-size:12px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.5px">Bank Account Name</label>
+        <input id="acct_name" placeholder="e.g. HDFC Savings, ICICI Salary" style="margin-top:6px;margin-bottom:10px">
+      </div>
+      <div>
+        <label style="font-size:12px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.5px">File Password (if protected)</label>
+        <input id="file_password" type="password" placeholder="Enter password only if the file is locked" style="margin-top:6px;margin-bottom:10px">
+      </div>
+    </div>
+    <div style="margin-top:4px">
+      <button class="btn bp" id="uploadBtn" onclick="uploadForReview()" disabled>🔍 Classify &amp; Review</button>
+      <button class="btn bo" onclick="clearUpload()">✕ Clear</button>
+    </div>
+    <div id="profile-gate-msg" style="display:none;margin-top:10px;font-size:13px;color:#b71c1c;font-weight:700"></div>
+  </div>
+
+  <div class="card" id="uploaded-files-card">
+    <h3>📁 Uploaded Files</h3>
+    <div id="uploaded-files-body" style="overflow-x:auto">
+      <p style="color:#bbb;font-size:13px">Log in to see previously uploaded statements.</p>
+    </div>
+  </div>
+
+</div>
+
+<!-- LEDGER -->
+<div class="pane" id="pane-ledger">
+  <div class="stat-grid" id="stat-cards"></div>
+  <div class="card">
+    <h3>Filter</h3>
+    <div class="grid4">
+      <div><label>Book</label>
+        <select id="f_book"><option value="">All Books</option>
+          <option value="BALANCE_SHEET">Balance Sheet</option>
+          <option value="INCOME_EXPENSE">Income &amp; Expenditure</option>
+          <option value="SUSPENSE">Suspense</option>
+        </select></div>
+      <div><label>Type</label>
+        <select id="f_type"><option value="">All</option><option>credit</option><option>debit</option></select></div>
+      <div><label>Search narration</label><input id="f_search" placeholder="SWIGGY, ZERODHA, SIP…"></div>
+      <div><label>Counterparty</label><input id="f_counterparty" placeholder="Arinjay, Swiggy, Zerodha…"></div>
+      <div><label>Account</label>
+        <select id="f_account"><option value="">All Accounts</option></select>
+      </div>
+    </div>
+    <div style="margin-top:12px">
+      <button class="btn bp" onclick="loadLedger()">🔍 Filter</button>
+      <button class="btn bo" onclick="loadLedger(true)">Show All</button>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Filtered Ledger Entries <span id="ledger-cnt" style="color:#aaa;font-weight:400"></span></h3>
+    <div id="ledger-table" style="overflow-x:auto"><p style="color:#bbb;font-size:13px">Apply a filter to see results here.</p></div>
+  </div>
+</div>
+
+<!-- REVIEW & APPROVE -->
+<div class="pane" id="pane-review">
+  <div id="review-status" class="alert alert-info" style="display:none"></div>
+
+  <!-- Approval action bar -->
+  <div id="review-action-bar" class="card" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
+      <div>
+        <span style="font-size:22px;font-weight:800;color:#1565c0" id="rv-total">0</span>
+        <span style="font-size:13px;color:#555;margin-left:6px">transactions staged</span>
+        &nbsp;·&nbsp;
+        <span style="color:#f57f17;font-weight:700" id="rv-reclassified">0 reclassified</span>
+        &nbsp;·&nbsp;
+        <span style="color:#b71c1c;font-weight:700" id="rv-anomaly">0 anomalies</span>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <button class="btn bg" onclick="approveAll()">✅ Approve All &amp; Post to Ledger</button>
+        <button class="btn bo" style="color:#b71c1c;border-color:#b71c1c" onclick="discardPending()">🗑 Discard Batch</button>
+      </div>
+    </div>
+    <div style="margin-top:10px;font-size:12px;color:#888">
+      Each row has a <strong>dropdown</strong> to pick a new category. Change as needed, then click <strong>Approve All</strong> to commit to ledger.
+    </div>
+    <!-- Quick filter bar -->
+    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <input id="rv-search" placeholder="🔍 Filter by narration or counterparty…"
+        oninput="filterReview()"
+        style="flex:1;min-width:200px;padding:7px 12px;border:1.5px solid #e0e0e0;border-radius:7px;font-size:12px">
+      <select id="rv-filter-status" onchange="filterReview()"
+        style="padding:7px 10px;border:1.5px solid #e0e0e0;border-radius:7px;font-size:12px">
+        <option value="">All Statuses</option>
+        <option value="PENDING">Pending</option>
+        <option value="RECLASSIFIED">Reclassified</option>
+      </select>
+      <select id="rv-filter-book" onchange="filterReview()"
+        style="padding:7px 10px;border:1.5px solid #e0e0e0;border-radius:7px;font-size:12px">
+        <option value="">All Books</option>
+        <option value="INCOME_EXPENSE">Income &amp; Exp</option>
+        <option value="BALANCE_SHEET">Balance Sheet</option>
+        <option value="SUSPENSE">Suspense</option>
+      </select>
+    </div>
+    <div id="add-rule-panel" style="margin:12px 0;padding:10px;background:#fff3e0;border-radius:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <strong style="color:#e65100">➕ Add Classifier Rule:</strong>
+    <input id="rule-pattern" placeholder="Narration pattern (e.g. SWIGGY)" style="flex:1;min-width:180px;padding:4px 8px;border:1px solid #ccc;border-radius:4px"/>
+    <select id="rule-match-mode" style="padding:4px 8px;border:1px solid #ccc;border-radius:4px">
+        <option value="contains">contains</option>
+        <option value="startswith">startswith</option>
+        <option value="regex">regex</option>
+    </select>
+    <select id="rule-txn-type" style="padding:4px 8px;border:1px solid #ccc;border-radius:4px">
+        <option value="debit">debit</option>
+        <option value="credit">credit</option>
+        <option value="both">both</option>
+    </select>
+    <select id="rule-ledger-key" style="flex:1;min-width:160px;padding:4px 8px;border:1px solid #ccc;border-radius:4px"></select>
+    <button onclick="addCustomRule()" style="background:#e65100;color:#fff;border:none;padding:5px 14px;border-radius:4px;cursor:pointer">Save Rule</button>
+    <span id="rule-save-msg" style="color:green;font-size:12px"></span>
+    </div>
+  </div>
+
+  <!-- Review rows container -->
+  <div id="review-rows-container" style="display:none">
+    <div id="review-rows"></div>
+  </div>
+
+  <div id="review-empty" style="text-align:center;padding:60px;color:#aaa">
+    <div style="font-size:48px;margin-bottom:12px">📋</div>
+    <div style="font-size:16px;font-weight:700">No pending transactions</div>
+    <div style="font-size:13px;margin-top:6px">Upload a bank statement in the <strong>Upload</strong> tab first.</div>
+  </div>
+</div>
+
+<!-- FINANCIAL STATEMENTS -->
+<div class="pane" id="pane-statements">
+  <!-- Filter bar -->
+  <div class="card" style="padding:16px 20px;margin-bottom:12px">
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+      <div>
+        <label style="font-size:11px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px">From</label>
+        <input type="date" id="stmt_date_from" style="padding:7px 10px;width:150px">
+      </div>
+      <div>
+        <label style="font-size:11px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px">To</label>
+        <input type="date" id="stmt_date_to" style="padding:7px 10px;width:150px">
+      </div>
+      <div>
+        <label style="font-size:11px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px">Account</label>
+        <select id="stmt_account" onchange="onAccountChange()" style="padding:7px 10px;min-width:160px">
+          <option value="">All Accounts</option>
+        </select>
+      </div>
+      <div>
+        <label style="font-size:11px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px">Year</label>
+        <select id="stmt_year" onchange="applyYearFilter()" style="padding:7px 10px;min-width:140px">
+          <option value="">All Years</option>
+        </select>
+      </div>
+      <button class="btn bp" onclick="refreshStmts()" style="padding:7px 18px">🔄 Generate</button>
+      <button class="btn bo" onclick="clearStmtFilters()" style="padding:7px 14px;font-size:12px">✕ Clear</button>
+      <button class="btn bo" onclick="loadYearlyStatements()" style="padding:7px 14px;font-size:12px">📅 Load Yearly</button>
+    </div>
+  </div>
+
+  <div id="yearly-reports-wrap" class="card" style="display:block;margin-bottom:12px"></div>
+
+  <!-- Sub-nav pills -->
+  <div style="display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap;align-items:center">
+    <button id="stmt-pill-income"  class="btn bp" onclick="showStmt('income')" style="border-radius:20px;padding:7px 18px">📈 Income Statement</button>
+    <button id="stmt-pill-balance" class="btn bg" onclick="showStmt('balance')" style="border-radius:20px;padding:7px 18px">🏦 Balance Sheet</button>
+    <button id="stmt-pill-pl"      class="btn bo" onclick="showStmt('pl')" style="border-radius:20px;padding:7px 18px;border-color:#7b1fa2;color:#7b1fa2">💼 Profit &amp; Loss</button>
+    <button class="btn bo" onclick="showStmt('all')" style="border-radius:20px;padding:7px 14px;margin-left:auto;font-size:12px">Show All</button>
+  </div>
+
+  <!-- Income Statement card -->
+  <div id="stmt-income" class="card" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;flex-wrap:wrap;gap:8px">
+      <div>
+        <h3 style="margin:0 0 2px">📈 Income Statement</h3>
+        <div style="font-size:12px;color:#888" id="stmt-income-period">Individual — Income &amp; Expenditure</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn bo" style="font-size:11px;padding:5px 12px" onclick="copyStmt('income')">📋 Copy</button>
+        <button class="btn bo" style="font-size:11px;padding:5px 12px" onclick="downloadStmt('income')">📥 Download</button>
+        <button class="btn bo" id="btn-copy-income-acct" style="font-size:11px;padding:5px 12px;display:none" onclick="copyStmt('income_acct')">📋 Copy (This Account)</button>
+        <button class="btn bo" id="btn-download-income-acct" style="font-size:11px;padding:5px 12px;display:none" onclick="downloadStmt('income_acct')">📥 Download (This Account)</button>
+        <button class="btn bo" style="font-size:11px;padding:5px 12px" onclick="downloadReportPdf('summary','income_statement')">🧾 Download Summary PDF</button>
+        <button class="btn bo" style="font-size:11px;padding:5px 12px" onclick="downloadReportPdf('detailed','income_statement')">📄 Download Income PDF</button>
+      </div>
+    </div>
+    <div id="stmt-income-chips" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px"></div>
+    <div id="stmt-income-split" style="display:none">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div>
+          <div style="background:#e3f2fd;border-radius:8px;padding:8px 14px;margin-bottom:10px;font-size:12px;font-weight:700;color:#1565c0" id="stmt-income-acct-label">📄 This Account</div>
+          <div id="stmt-income-acct-chips" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px"></div>
+          <div id="stmt-income-acct-body" style="font-size:11.5px"></div>
+        </div>
+        <div>
+          <div style="background:#f3e5f5;border-radius:8px;padding:8px 14px;margin-bottom:10px;font-size:12px;font-weight:700;color:#6a1b9a">📊 All Accounts Combined</div>
+          <div id="stmt-income-all-chips" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px"></div>
+          <div id="stmt-income-all-body" style="font-size:11.5px"></div>
+        </div>
+      </div>
+    </div>
+    <div id="stmt-income-single">
+      <div id="stmt-income-body"></div>
+    </div>
+  </div>
+
+  <!-- Balance Sheet card -->
+  <div id="stmt-balance" class="card" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;flex-wrap:wrap;gap:8px">
+      <div>
+        <h3 style="margin:0 0 2px">🏦 Balance Sheet / Net Worth</h3>
+        <div style="font-size:12px;color:#888" id="stmt-balance-period">Individual — Assets · Liabilities · Equity</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn bo" style="font-size:11px;padding:5px 12px" onclick="copyStmt('balance')">📋 Copy</button>
+        <button class="btn bo" style="font-size:11px;padding:5px 12px" onclick="downloadStmt('balance')">📥 Download</button>
+        <button class="btn bo" id="btn-copy-balance-acct" style="font-size:11px;padding:5px 12px;display:none" onclick="copyStmt('balance_acct')">📋 Copy (This Account)</button>
+        <button class="btn bo" id="btn-download-balance-acct" style="font-size:11px;padding:5px 12px;display:none" onclick="downloadStmt('balance_acct')">📥 Download (This Account)</button>
+        <button class="btn bo" style="font-size:11px;padding:5px 12px" onclick="downloadReportPdf('summary','balance_sheet')">🧾 Download Summary PDF</button>
+        <button class="btn bo" style="font-size:11px;padding:5px 12px" onclick="downloadReportPdf('detailed','balance_sheet')">📄 Download Balance Sheet PDF</button>
+      </div>
+    </div>
+    <div id="stmt-balance-chips" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px"></div>
+    <div id="stmt-balance-split" style="display:none">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div>
+          <div style="background:#e3f2fd;border-radius:8px;padding:8px 14px;margin-bottom:10px;font-size:12px;font-weight:700;color:#1565c0" id="stmt-balance-acct-label">📄 This Account</div>
+          <div id="stmt-balance-acct-chips" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px"></div>
+          <div id="stmt-balance-acct-body" style="font-size:11.5px"></div>
+        </div>
+        <div>
+          <div style="background:#f3e5f5;border-radius:8px;padding:8px 14px;margin-bottom:10px;font-size:12px;font-weight:700;color:#6a1b9a">📊 All Accounts Combined</div>
+          <div id="stmt-balance-all-chips" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px"></div>
+          <div id="stmt-balance-all-body" style="font-size:11.5px"></div>
+        </div>
+      </div>
+    </div>
+    <div id="stmt-balance-single">
+      <div id="stmt-balance-body"></div>
+    </div>
+  </div>
+
+  <!-- Profit & Loss card -->
+  <div id="stmt-pl" class="card" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;flex-wrap:wrap;gap:8px">
+      <div>
+        <h3 style="margin:0 0 2px">💼 Profit &amp; Loss Statement</h3>
+        <div style="font-size:12px;color:#888" id="stmt-pl-period">Organisation — Revenue · Operating · Financial · Tax</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn bo" style="font-size:11px;padding:5px 12px" onclick="copyStmt('pl')">📋 Copy</button>
+        <button class="btn bo" style="font-size:11px;padding:5px 12px" onclick="downloadStmt('pl')">📥 Download</button>
+        <button class="btn bo" id="btn-copy-pl-acct" style="font-size:11px;padding:5px 12px;display:none" onclick="copyStmt('pl_acct')">📋 Copy (This Account)</button>
+        <button class="btn bo" id="btn-download-pl-acct" style="font-size:11px;padding:5px 12px;display:none" onclick="downloadStmt('pl_acct')">📥 Download (This Account)</button>
+      </div>
+    </div>
+    <div id="stmt-pl-chips" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px"></div>
+    <div id="stmt-pl-split" style="display:none">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div>
+          <div style="background:#e3f2fd;border-radius:8px;padding:8px 14px;margin-bottom:10px;font-size:12px;font-weight:700;color:#1565c0" id="stmt-pl-acct-label">📄 This Account</div>
+          <div id="stmt-pl-acct-chips" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px"></div>
+          <div id="stmt-pl-acct-body" style="font-size:11.5px"></div>
+        </div>
+        <div>
+          <div style="background:#f3e5f5;border-radius:8px;padding:8px 14px;margin-bottom:10px;font-size:12px;font-weight:700;color:#6a1b9a">📊 All Accounts Combined</div>
+          <div id="stmt-pl-all-chips" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px"></div>
+          <div id="stmt-pl-all-body" style="font-size:11.5px"></div>
+        </div>
+      </div>
+    </div>
+    <div id="stmt-pl-single">
+      <div id="stmt-pl-body"></div>
+    </div>
+  </div>
+
+  <div id="stmt-empty" style="text-align:center;padding:60px;color:#aaa">
+    <div style="font-size:48px;margin-bottom:12px">📑</div>
+    <div style="font-size:16px;font-weight:700">No statements yet</div>
+    <div style="font-size:13px;margin-top:6px">Approve a transaction batch first — statements generate automatically.</div>
+  </div>
+</div>
+
+<!-- REPORT -->
+<div class="pane" id="pane-report">
+  <div class="card">
+    <h3>Generate Full Ledger Report</h3>
+    <p style="font-size:13px;color:#666;margin:0 0 14px">
+      Produces Book I (Income &amp; Expenditure), Book II (Balance Sheet), Book III (Balance Check) with attributions.
+    </p>
+    <button class="btn bg" onclick="genReport()">📒 Generate Full Ledger Report</button>
+    <button class="btn bo" onclick="document.getElementById('ledger-out').textContent=''" style="margin-left:8px">Clear</button>
+  </div>
+  <div class="card"><pre id="ledger-out">Click Generate to produce the full 3-book ledger report.</pre></div>
+</div>
+
+<!-- TRADING CASH FLOW -->
+<div class="pane" id="pane-trading-cashflow">
+  <div class="card">
+    <h3>💹 Trading Account — Cash Flow Statement</h3>
+    <p style="font-size:13px;color:#666;margin:0 0 14px">
+      Indirect-method cash flow for 5paisa / broker ledger. Upload the trading ledger XLS first, then generate the statement.
+    </p>
+
+    <!-- Upload section -->
+    <div style="border:1px solid #e0e0e0;border-radius:10px;padding:16px;margin-bottom:16px;background:#fafbff">
+      <div style="font-weight:800;font-size:13px;color:#1565c0;margin-bottom:10px">📂 Step 1 — Upload Trading Ledger (XLS)</div>
+      <div class="drop-zone" id="tcf-drop-zone" onclick="document.getElementById('tcf-file').click()"
+           ondragover="event.preventDefault();this.classList.add('dragover')"
+           ondragleave="this.classList.remove('dragover')" ondrop="tcfHandleDrop(event)"
+           style="padding:20px">
+        <!-- ── PDF SUPPORT (NEW) ── accept PDF uploads alongside Excel -->
+        <input type="file" id="tcf-file" accept=".xls,.xlsx,.xlsm,.pdf" onchange="tcfSetFile(event.target.files[0])">
+        <div style="font-size:32px;margin-bottom:6px">📄</div>
+        <p style="font-weight:700;margin:0 0 4px;font-size:13px">Click to upload or drag &amp; drop</p>
+        <small style="color:#888">5paisa / broker XLS ledger — auto-parsed via ZIP+XML</small>
+      </div>
+      <div id="tcf-file-preview" style="display:none;margin-top:8px;padding:8px 14px;background:#f5f7fa;border-radius:8px;font-size:13px"></div>
+      <div style="margin-top:10px">
+        <input id="tcf-account-id" placeholder="Account ID (e.g. 58439330)" style="width:220px;display:inline-block">
+        &nbsp;
+        <button class="btn bp" id="tcf-upload-btn" onclick="tcfUpload()" disabled>⬆️ Upload &amp; Parse</button>
+        <span id="tcf-upload-msg" style="font-size:12px;margin-left:10px;color:#666"></span>
+      </div>
+    </div>
+
+    <!-- Generate section -->
+    <div style="border:1px solid #e0e0e0;border-radius:10px;padding:16px;background:#f9fff9">
+      <div style="font-weight:800;font-size:13px;color:#1b5e20;margin-bottom:10px">📊 Step 2 — Generate Cash Flow Statement</div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+        <div>
+          <label style="font-size:11px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px">From</label>
+          <input type="date" id="tcf-date-from" style="padding:7px 10px;width:150px">
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px">To</label>
+          <input type="date" id="tcf-date-to" style="padding:7px 10px;width:150px">
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px">Account ID</label>
+          <input id="tcf-gen-account" placeholder="58439330" style="padding:7px 10px;width:140px">
+        </div>
+        <button class="btn bg" onclick="loadTradingCashflow()" style="padding:7px 18px">🔄 Generate Statement</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Summary chips -->
+  <div id="tcf-chips" style="display:none;display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px;padding:0 2px"></div>
+
+  <!-- Report output -->
+  <div class="card" id="tcf-report-card" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <h3 style="margin:0">Cash Flow Report</h3>
+      <button class="btn bo" style="font-size:11px;padding:5px 12px"
+              onclick="_copyText(document.getElementById('tcf-report-out').textContent, this)">📋 Copy</button>
+    </div>
+    <pre id="tcf-report-out" style="background:#0d1117;color:#e6edf3;padding:20px;border-radius:12px;overflow:auto;max-height:650px;font-family:var(--mono);font-size:11.5px;line-height:1.7;white-space:pre-wrap;border:1px solid #30363d"></pre>
+  </div>
+  <div id="tcf-empty" style="text-align:center;padding:60px;color:#aaa">
+    <div style="font-size:48px;margin-bottom:12px">💹</div>
+    <div style="font-size:16px;font-weight:700">No trading cash flow yet</div>
+    <div style="font-size:13px;margin-top:6px">Upload a 5paisa ledger XLS and click Generate.</div>
+  </div>
+</div>
+
+<!-- SETUP -->
+<div class="pane" id="pane-setup">
+  <div id="active-user-banner" style="display:none;background:linear-gradient(135deg,#e8f5e9,#c8e6c9);border:1px solid #a5d6a7;border-radius:12px;padding:14px 20px;margin-bottom:16px;justify-content:space-between;align-items:center">
+    <div>
+      <div style="font-weight:800;font-size:14px;color:#1b5e20">✅ Active Session</div>
+      <div id="active-user-info" style="font-size:13px;color:#2e7d32;margin-top:3px"></div>
+    </div>
+    <button class="btn bo" onclick="logoutUser()" style="font-size:12px;padding:7px 16px">Switch User</button>
+  </div>
+
+  <div class="card" id="user-auth-card">
+    <h3>🧭 Classification Setup</h3>
+    <p style="font-size:13px;color:#666;margin:0 0 14px">Step 1: Create Account. Step 2: Basic Classification Profile. This improves salary, family loan, broker, and own account classification.</p>
+    <div style="display:flex;gap:0;border-bottom:2px solid #f0f0f0;margin-bottom:16px">
+      <div id="tab-login" onclick="authTab('login')" style="padding:10px 22px;cursor:pointer;font-weight:800;font-size:13px;color:var(--blue);border-bottom:3px solid var(--blue);letter-spacing:.3px">🔑 Log In</div>
+      <div id="tab-create" onclick="authTab('create')" style="padding:10px 22px;cursor:pointer;font-weight:700;font-size:13px;color:#aaa;border-bottom:3px solid transparent;letter-spacing:.3px">➕ New Account</div>
+    </div>
+
+
+
+    <div id="panel-login">
+  <div class="grid2">
+    <div><label>Name</label><input id="l_name" placeholder="Enter your name" autocomplete="name"></div>
+    <div><label>Phone</label><input id="l_phone" placeholder="9876543210"></div>
+  </div>
+
+  <div class="grid2">
+    <div><label>Email</label><input id="l_email" placeholder="mani@example.com"></div>
+    <div><label>Password *</label><input id="l_password" type="password" placeholder="Enter password" autocomplete="current-password"></div>
+
+
+
+ 
+
+
+
+  </div>
+
+  <div style="margin-top:16px;display:flex;align-items:center;gap:14px">
+    <button class="btn bp" onclick="loginUser()">🔑 Log In</button>
+    <div id="login-msg" style="font-size:13px"></div>
+  </div>
+
+  <div style="margin-top:10px">
+    <button type="button" class="btn bo" onclick="alert('Password reset feature coming soon')">
+      Forgot Password?
+    </button>
+  </div>
+</div>
+
+<div id="panel-create" style="display:none">
+  <div class="grid2">
+    <div><label>Full Name *</label><input id="u_name" placeholder="Enter your full name"></div>
+    <div><label>Email</label><input id="u_email" placeholder="mani@example.com"></div>
+  </div>
+
+  <div class="grid2">
+    <div><label>Phone</label><input id="u_phone" placeholder="9876543210"></div>
+    <div><label>Bank</label><input id="u_bank" value="HDFC Bank"></div>
+  </div>
+
+  <div class="grid2">
+    <div>
+      <label>Password *</label>
+      <div style="position:relative">
+        <input id="u_password" type="password" placeholder="Min 8 chars and 1 special character" autocomplete="new-password" style="padding-right:40px">
+        <span onclick="toggleCreatePassword()" style="position:absolute;right:12px;top:12px;cursor:pointer">👁️</span>
+      </div>
+    </div>
+
+    <div>
+      <label>Confirm Password *</label>
+      <div style="position:relative">
+        <input id="u_password_confirm" type="password" placeholder="Re-enter password" autocomplete="new-password" style="padding-right:40px">
+        <span onclick="toggleConfirmPassword()" style="position:absolute;right:12px;top:12px;cursor:pointer">👁️</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="margin-top:16px">
+    <label style="text-transform:uppercase;letter-spacing:.5px;font-size:12px;font-weight:700;color:#555;margin-bottom:10px;display:block">Account Type *</label>
+
+    <div style="display:flex;gap:24px">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:600;text-transform:none;letter-spacing:0;margin:0;color:#333">
+        <input type="radio" name="u_type" value="INDIVIDUAL" style="width:auto;accent-color:#1565c0" checked onchange="document.getElementById('u_user_type').value=this.value">
+        👤 Individual
+      </label>
+
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:600;text-transform:none;letter-spacing:0;margin:0;color:#333">
+        <input type="radio" name="u_type" value="ORGANISATION" style="width:auto;accent-color:#1565c0" onchange="document.getElementById('u_user_type').value=this.value">
+        🏢 Organisation
+      </label>
+    </div>
+
+    <input type="hidden" id="u_user_type" value="INDIVIDUAL">
+  </div>
+
+  <div style="margin-top:16px;display:flex;align-items:center;gap:14px">
+    <button class="btn bg" onclick="createUser()">➕ Create Account</button>
+    <div id="create-msg" style="font-size:13px"></div>
+  </div>
+</div>
+
+<div id="profile-setup-card" style="margin-top:18px;border-top:1px solid #eef1f5;padding-top:18px">
+  <h3>Step 2 — Basic Classification Profile</h3>
+  <p style="font-size:13px;color:#666;margin:0 0 14px">This improves salary, family loan, broker, and own account classification. Save anytime and edit later.</p>
+  <div id="profile_gate_banner" class="alert alert-info" style="display:none;margin-bottom:14px"></div>
+  <div id="profile_logged_out_msg" class="alert alert-info" style="display:none;margin-bottom:14px">Create account first to save your classification profile</div>
+
+  <div id="profile-basic-section" class="grid3">
+    <div>
+      <label>Entity Type</label>
+      <select id="pf_entity_type" onchange="toggleProfileSections()">
+        <option value="">Select</option>
+        <option value="INDIVIDUAL">Individual</option>
+        <option value="NRI">NRI</option>
+        <option value="HUF">HUF</option>
+      </select>
+    </div>
+    <div>
+      <label>Legal Name</label>
+      <input id="pf_legal_name" placeholder="Account holder / legal entity name">
+    </div>
+    <div id="pf_huf_name_wrap" style="display:none">
+      <label>HUF Name</label>
+      <input id="pf_huf_name" placeholder="Sarju Garg HUF" oninput="toggleProfileSections()">
+    </div>
+  </div>
+
+
+
+    <div class="grid3">
+      <div>
+        <label>Date Of Birth</label>
+        <input id="pf_dob" type="date">
+      </div>
+      <div style="display:flex;align-items:flex-end">
+        <label style="display:flex;align-items:center;gap:8px;margin:0;text-transform:none;font-size:13px;color:#333">
+          <input id="pf_family_toggle" type="checkbox" style="width:auto" onchange="toggleProfileSections()">
+          Family transactions present
+        </label>
+      </div>
+      <div style="display:flex;align-items:flex-end">
+        <label style="display:flex;align-items:center;gap:8px;margin:0;text-transform:none;font-size:13px;color:#333">
+          <input id="pf_credit_cards" type="checkbox" style="width:auto">
+          Has credit cards
+        </label>
+      </div>
+    </div>
+
+    <div class="grid3">
+      <div style="display:flex;align-items:flex-end">
+        <label style="display:flex;align-items:center;gap:8px;margin:0;text-transform:none;font-size:13px;color:#333">
+          <input id="pf_salaried_toggle" type="checkbox" style="width:auto" onchange="toggleProfileSections()">
+          Salaried
+        </label>
+      </div>
+      <div id="pf_employer_wrap" style="display:none">
+        <label>Employer Name</label>
+        <input id="pf_employer_name" placeholder="Employer / payroll counterparty">
+      </div>
+      <div style="display:flex;align-items:flex-end">
+        <label style="display:flex;align-items:center;gap:8px;margin:0;text-transform:none;font-size:13px;color:#333">
+          <input id="pf_consultancy_toggle" type="checkbox" style="width:auto" onchange="toggleProfileSections()">
+          Consultancy income
+        </label>
+      </div>
+    </div>
+
+    <div class="grid3">
+      <div style="display:flex;align-items:flex-end">
+        <label style="display:flex;align-items:center;gap:8px;margin:0;text-transform:none;font-size:13px;color:#333">
+          <input id="pf_trading_toggle" type="checkbox" style="width:auto" onchange="toggleProfileSections()">
+          Trading / broker activity
+        </label>
+      </div>
+      <div style="display:flex;align-items:flex-end">
+        <label style="display:flex;align-items:center;gap:8px;margin:0;text-transform:none;font-size:13px;color:#333">
+          <input id="pf_multi_bank_toggle" type="checkbox" style="width:auto" onchange="toggleProfileSections()">
+          Multiple bank accounts
+        </label>
+      </div>
+      <div style="display:flex;align-items:flex-end">
+        <label style="display:flex;align-items:center;gap:8px;margin:0;text-transform:none;font-size:13px;color:#333">
+          <input id="pf_rental_income" type="checkbox" style="width:auto">
+          Rental income
+        </label>
+      </div>
+    </div>
+
+    <div id="pf_family_section" style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div style="font-weight:800;font-size:13px;color:#444">Family / Known Family Counterparties</div>
+        <button class="btn bo" style="font-size:11px;padding:5px 12px" onclick="addProfileCounterpartyRow('family')">＋ Add Family Row</button>
+      </div>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>Display Name</th><th>Relationship</th><th>Default Treatment</th><th>Default Ledger Key</th><th>Txn Direction Hint</th><th>Notes</th><th></th></tr></thead>
+          <tbody id="pf_family_rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="pf_consultancy_section" style="margin-top:18px;display:none">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div style="font-weight:800;font-size:13px;color:#444">Consultancy Counterparties</div>
+        <button class="btn bo" style="font-size:11px;padding:5px 12px" onclick="addProfileCounterpartyRow('consultancy')">＋ Add Consultancy Row</button>
+      </div>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>Display Name</th><th>Relationship</th><th>Default Treatment</th><th>Default Ledger Key</th><th>Txn Direction Hint</th><th>Notes</th><th></th></tr></thead>
+          <tbody id="pf_consultancy_rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="pf_broker_section" style="margin-top:18px;display:none">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div style="font-weight:800;font-size:13px;color:#444">Broker Counterparties</div>
+        <button class="btn bo" style="font-size:11px;padding:5px 12px" onclick="addProfileCounterpartyRow('broker')">＋ Add Broker Row</button>
+      </div>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>Display Name</th><th>Relationship</th><th>Default Treatment</th><th>Default Ledger Key</th><th>Txn Direction Hint</th><th>Notes</th><th></th></tr></thead>
+          <tbody id="pf_broker_rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="pf_accounts_section" style="margin-top:18px;display:none">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div style="font-weight:800;font-size:13px;color:#444">Known Accounts</div>
+        <button class="btn bo" style="font-size:11px;padding:5px 12px" onclick="addKnownAccountRow()">＋ Add Account Row</button>
+      </div>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>Account Label</th><th>Institution Name</th><th>Account Mask</th><th>Account Type</th><th>Ownership Type</th><th></th></tr></thead>
+          <tbody id="pf_account_rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div style="margin-top:16px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <button id="pf_save_btn" class="btn bp" onclick="saveProfileQuestionnaire()">💾 Save Profile</button>
+      <button id="pf_reload_btn" class="btn bo" onclick="loadProfileQuestionnaire()">↻ Reload Saved Profile</button>
+      <button id="pf_apply_approved_btn" class="btn bo" onclick="applyProfileToApprovedSafe()">Apply to Approved Safely</button>
+      <div id="pf_msg" style="font-size:13px;color:#666"></div>
+    </div>
+  </div>
+  </div>
+
+  <div class="card">
+    <h3>📚 Dictionary Setup</h3>
+    <p style="font-size:13px;color:#666;margin:0 0 12px">Browse every ledger key — which book it belongs to, what it means, and who it's attributed to.</p>
+    <button class="btn bp" onclick="loadDictionary()">📚 Open Ledger Dictionary</button>
+    <div id="dict-out" style="margin-top:14px;display:none">
+      <input id="dict-search" placeholder="🔍 Search keys, descriptions…" oninput="filterDict()"
+        style="width:100%;padding:8px 12px;border:1.5px solid #e0e0e0;border-radius:7px;font-size:12px;margin-bottom:10px">
+      <div id="dict-body"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>📖 Accounting Basis Explained</h3>
+    <div style="font-size:13px;color:#444;line-height:1.7">
+      <p><strong>This system uses 3-book accounting:</strong></p>
+      <p>📗 <strong>Book I — Income &amp; Expenditure:</strong> All revenues received and all expenses paid (cash basis). Bank debits = expenses already settled, not "liabilities".</p>
+      <p>📘 <strong>Book II — Balance Sheet:</strong> Only true balance-sheet items — Assets (investments, loans given, land, FDs) and Liabilities (outstanding loan principal, credit card balance).</p>
+      <p>📙 <strong>Book III — Balance Check:</strong> Net Worth = Assets − Liabilities + Equity + Net Surplus from P&amp;L.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>🔍 System Check</h3>
+    <button class="btn bo" onclick="checkSys()">Run Check</button>
+    <pre id="sys-out" style="margin-top:12px;background:#f5f7fa;padding:14px;border-radius:8px;font-size:12px;font-family:var(--mono);white-space:pre-wrap"></pre>
+  </div>
+
+  <div class="card" id="opening-balance-card">
+  <h3>💰 Opening Balance</h3>
+  <p style="font-size:13px;color:#666;margin:0 0 14px">
+    Set the bank account balance on the date of your <strong>first uploaded statement</strong>.
+    This is the B/F (Brought Forward) figure from your statement's first row.
+  </p>
+    <div class="grid2">
+      <div><label>Opening Balance (₹)</label>
+        <input id="ob_amount" type="number" step="0.01" placeholder="e.g. 13665.69"></div>
+      <div style="display:flex;align-items:flex-end;padding-bottom:2px">
+        <button id="ob_save_btn" class="btn bp" onclick="setOpeningBalance()" style="width:100%">💾 Save Opening Balance</button>
+      </div>
+    </div>
+    <div id="ob-msg" style="font-size:13px;margin-top:10px"></div>
+  </div>
+
+  <div class="card" id="manage-data-card">
+    <h3>🗂 Manage Data</h3>
+    <p style="font-size:13px;color:#666;margin:0 0 14px">Delete transaction data by account or clear everything. Your user account is never deleted.</p>
+    <div id="manage-accounts-list"><p style="font-size:13px;color:#aaa">Log in to manage data.</p></div>
+    <div style="margin-top:14px;border-top:1px solid #f0f0f0;padding-top:14px">
+      <button id="delete_all_btn" class="btn bo" style="color:#b71c1c;border-color:#b71c1c" onclick="deleteAllData()">🗑 Delete All Data</button>
+      <button id="delete_user_btn" class="btn bo" style="color:#8b0000;border-color:#8b0000" onclick="deleteUserCompletely()">⛔ Delete User</button>
+    </div>
+    <div id="manage-msg" style="font-size:13px;margin-top:10px"></div>
+  </div>
+</div>
+
+<script>
+// ── Tab routing ──────────────────────────────────────────────────────────────
+const TABS = ['classify','review','statements','ledger','report','trading-cashflow','setup'];
+function tab(n){
+  TABS.forEach((t,i)=>{
+    const tabEls = document.querySelectorAll('.tab');
+    if(tabEls[i]) tabEls[i].classList.toggle('active',t===n);
+    const pane = document.getElementById('pane-'+t);
+    if(pane) pane.classList.toggle('active',t===n);
+  });
+  if(n==='ledger') loadStats();
+  if(n==='classify') refreshUploadedFiles();
+  if(n==='setup') refreshProfileGate({preserveBanner:true});
+  if(n==='review'){
+    if(Array.isArray(_reviewRowsPrefetched)){ loadReview(); }
+    else if(!_allReviewRows.length){ loadReview(); }
+    else { _ensureLedgerKeys().then(()=>filterReview()); }
+  }
+  if(n==='statements') showStmtTab();
+}
+function setStatus(msg,type='info'){const el=document.getElementById('status');if(el){el.textContent=msg;el.className='alert alert-'+type;}}
+
+// ── Ledger display helpers ───────────────────────────────────────────────────
+const BOOK_CLASS={'BALANCE_SHEET':'book-bs','INCOME_EXPENSE':'book-ie','CAPITAL':'book-cap','SUSPENSE':'book-sus'};
+const BOOK_LABEL={'BALANCE_SHEET':'Balance Sheet','INCOME_EXPENSE':'Income & Exp','CAPITAL':'Capital','SUSPENSE':'Suspense'};
+const SEC_ICON={'Income':'📈','Expenditure':'💸','Assets':'🏦','Liabilities':'📜','Equity':'👤','Suspense':'⚠️'};
+let _uid=0;
+let _activeUserId='';
+let _profileGateState={ok:false,profile_required:false,is_complete:false,missing_reason:''};
+
+function _profileGateText(reason=''){
+  return reason
+    ? `Complete basic classification profile before importing statements. ${reason}`
+    : 'Complete basic classification profile before importing statements';
+}
+
+function _setProfileBanner(msg='', kind='info'){
+  const el=document.getElementById('profile_gate_banner');
+  if(!el) return;
+  if(!msg){
+    el.style.display='none';
+    el.textContent='';
+    el.className='alert alert-info';
+    return;
+  }
+  el.style.display='block';
+  el.textContent=msg;
+  el.className=`alert alert-${kind}`;
+}
+
+function _focusProfileSetup(message=''){
+  tab('setup');
+  if(message) _setProfileBanner(message, 'info');
+  const card=document.getElementById('profile-setup-card');
+  if(card) card.scrollIntoView({behavior:'smooth', block:'start'});
+  const first=document.getElementById('pf_entity_type') || document.getElementById('pf_legal_name');
+  if(first && !first.disabled) setTimeout(()=>first.focus(), 250);
+}
+
+function _setProfileInputsEnabled(enabled){
+  document.querySelectorAll('#profile-setup-card input,#profile-setup-card select,#profile-setup-card textarea,#profile-setup-card button')
+    .forEach(el=>{ el.disabled = !enabled; });
+  const loggedOut=document.getElementById('profile_logged_out_msg');
+  if(loggedOut) loggedOut.style.display = enabled ? 'none' : 'block';
+  if(!enabled) _profileMsg('Create account first to save your classification profile', '#b71c1c');
+}
+
+function _applySetupInteractionState(){
+  const loggedIn=!!_activeUserId;
+  _setProfileInputsEnabled(loggedIn);
+  const obBtn=document.getElementById('ob_save_btn');
+  const obInput=document.getElementById('ob_amount');
+  if(obBtn) obBtn.disabled=!loggedIn;
+  if(obInput) obInput.disabled=!loggedIn;
+  ['delete_all_btn','delete_user_btn'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el) el.disabled=!loggedIn;
+  });
+  const manageList=document.getElementById('manage-accounts-list');
+  if(manageList && !loggedIn){
+    manageList.innerHTML='<p style="font-size:13px;color:#aaa">Log in to manage data.</p>';
+  }
+}
+
+
+
+
+let _tcfFile = null;
+
+function _applyProfileGate(){
+  const blocked=!!_profileGateState.profile_required;
+  const noUser=!_activeUserId;
+  const uploadBtn=document.getElementById('uploadBtn');
+  const tradingUploadBtn=document.getElementById('tcf-upload-btn');
+  const tradingMsg=document.getElementById('tcf-upload-msg');
+  const gateMsg=document.getElementById('profile-gate-msg');
+  const dropZone=document.getElementById('dropZone');
+  if(uploadBtn) uploadBtn.disabled = noUser || blocked || !_file;
+  if(tradingUploadBtn) tradingUploadBtn.disabled = noUser || blocked || !_tcfFile;
+  if(gateMsg){
+    gateMsg.style.display = (noUser || blocked) ? 'block' : 'none';
+    gateMsg.textContent = noUser ? 'Log in or create an account before importing statements.' : (blocked ? _profileGateText(_profileGateState.missing_reason || '') : '');
+  }
+  if(tradingMsg && (noUser || blocked)){
+    tradingMsg.innerHTML = `<span style="color:var(--red)">${noUser ? 'Log in before uploading a trading ledger.' : _profileGateText(_profileGateState.missing_reason || '')}</span>`;
+  }else if(tradingMsg && !blocked && !_tcfFile){
+    tradingMsg.textContent = '';
+  }
+  if(dropZone){
+    dropZone.style.opacity = (noUser || blocked) ? '0.72' : '1';
+    dropZone.style.borderStyle = blocked ? 'dashed' : 'dashed';
+  }
+  const advancedCollapsed=!!_activeUserId && blocked;
+  ['pf_family_section','pf_consultancy_section','pf_broker_section','pf_accounts_section'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el && advancedCollapsed) el.style.display='none';
+  });
+}
+
+async function refreshProfileGate(opts={}){
+  const preserveBanner=!!opts.preserveBanner;
+  if(!_activeUserId){
+    _profileGateState={ok:false,profile_required:false,is_complete:false,missing_reason:''};
+    if(!preserveBanner) _setProfileBanner('Create account first to save your classification profile', 'info');
+    _applySetupInteractionState();
+    _applyProfileGate();
+    return _profileGateState;
+  }
+  try{
+    const r=await fetch('/profile-status');
+    const d=r.ok ? await r.json() : {};
+    _profileGateState={
+      ok: !!d.ok,
+      profile_required: !!d.profile_required,
+      is_complete: !!d.is_complete,
+      missing_reason: d.missing_reason || ''
+    };
+  }catch(_e){
+    _profileGateState={ok:false,profile_required:false,is_complete:false,missing_reason:''};
+  }
+  if(_profileGateState.profile_required){
+    _setProfileBanner(opts.message || _profileGateText(_profileGateState.missing_reason), 'info');
+    if(opts.focusProfile) _focusProfileSetup(opts.message || _profileGateText(_profileGateState.missing_reason));
+  }else if(!preserveBanner){
+    _setProfileBanner('Basic classification profile complete. Statement import is enabled.', 'ok');
+  }
+  _applySetupInteractionState();
+  _applyProfileGate();
+  return _profileGateState;
+}
+
+function renderResults(rows){
+  // renderResults is now a no-op — results go directly to the Review tab
+  // Kept for backward compatibility
+  if(rows && rows.length){ _allReviewRows=rows; renderReviewRows(rows); }
+}
+function toggleEl(id){const el=document.getElementById(id);if(el)el.style.display=el.style.display==='none'?'block':'none';}
+
+// ── Upload → stage for review ─────────────────────────────────────────────────
+let _file=null;
+function handleDrop(e){e.preventDefault();document.getElementById('dropZone').classList.remove('dragover');const f=e.dataTransfer.files[0];if(f)setFile(f);}
+function setFile(f){_file=f;const p=document.getElementById('file-preview');p.style.display='block';p.innerHTML=`📎 <strong>${f.name}</strong> · ${(f.size/1024).toFixed(1)} KB &nbsp; <a href="/download-upload/${encodeURIComponent(f.name)}" download style="font-size:12px;color:#1565c0">📥 Download</a>`;_applyProfileGate();}
+function clearUpload(){_file=null;document.getElementById('xlFile').value='';document.getElementById('file-preview').style.display='none';const fp=document.getElementById('file_password');if(fp)fp.value='';_applyProfileGate();setStatus('Ready — upload a bank statement.','info');}
+
+function _fmtUploadedDate(s){
+  if(!s) return '';
+  const d=new Date(s);
+  if(Number.isNaN(d.getTime())) return String(s).slice(0,19).replace('T',' ');
+  return d.toLocaleString(undefined,{year:'numeric',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+}
+function _fmtPeriod(row){
+  const a=row.statement_from_date||'', b=row.statement_to_date||'';
+  return a && b ? `${a} to ${b}` : (a || b || '—');
+}
+async function refreshUploadedFiles(){
+  const box=document.getElementById('uploaded-files-body');
+  if(!box) return;
+  if(!_activeUserId){
+    box.innerHTML='<p style="color:#bbb;font-size:13px">Log in to see previously uploaded statements.</p>';
+    return;
+  }
+  box.innerHTML='<p style="color:#888;font-size:13px">Loading uploaded files…</p>';
+  try{
+    const r=await fetch('/uploaded-files');
+    const d=r.ok ? await r.json() : {files:[]};
+    const files=Array.isArray(d.files) ? d.files : [];
+    if(!files.length){
+      box.innerHTML='<p style="color:#bbb;font-size:13px">No uploaded files yet.</p>';
+      return;
+    }
+    const rows=files.map(f=>{
+      const name=_escapeHtmlAttr(f.file_name||'Uploaded statement');
+      const acct=_escapeHtmlAttr(f.account_id||'main');
+      const status=_escapeHtmlAttr(f.import_status||'');
+      const period=_escapeHtmlAttr(_fmtPeriod(f));
+      const uploaded=_escapeHtmlAttr(_fmtUploadedDate(f.created_at));
+      const count=Number(f.approved_rows||0) ? `${f.approved_rows} approved` : `${f.staged_rows||0} staged`;
+      const btn=f.download_available
+        ? `<button class="btn bo" style="font-size:11px;padding:5px 10px" onclick="downloadUploadedFile('${_escapeHtmlAttr(f.id)}')">Download</button>`
+        : `<span style="color:#aaa;font-size:12px">Unavailable</span>`;
+      return `<tr>
+        <td style="padding:8px;border-bottom:1px solid #eee;font-weight:700">${name}<div style="font-size:11px;color:#999;font-weight:400">${_escapeHtmlAttr(count)}</div></td>
+        <td style="padding:8px;border-bottom:1px solid #eee">${acct}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee">${uploaded}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee">${period}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee">${status}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee;text-align:right">${btn}</td>
+      </tr>`;
+    }).join('');
+    box.innerHTML=`<table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="text-align:left;color:#666;background:#f8fafc">
+        <th style="padding:8px">File</th><th style="padding:8px">Account</th><th style="padding:8px">Uploaded</th>
+        <th style="padding:8px">Statement Period</th><th style="padding:8px">Status</th><th style="padding:8px;text-align:right">Action</th>
+      </tr></thead><tbody>${rows}</tbody></table>`;
+  }catch(e){
+    box.innerHTML=`<p style="color:#b71c1c;font-size:13px">Could not load uploaded files: ${_escapeHtmlAttr(e.message||e)}</p>`;
+  }
+}
+function downloadUploadedFile(id){
+  if(!id) return;
+  window.location.href='/download-uploaded-file?id='+encodeURIComponent(id);
+}
+
+async function uploadForReview(){
+  if(!_activeUserId){
+    setStatus('Log in or create an account before importing statements.','err');
+    tab('setup');
+    return;
+  }
+  if(_profileGateState.profile_required){
+    setStatus(_profileGateText(_profileGateState.missing_reason),'err');
+    _focusProfileSetup(_profileGateText(_profileGateState.missing_reason));
+    return;
+  }
+  if(!_file){setStatus('Select a file first','err');return;}
+  const uploadBtn=document.getElementById('uploadBtn');
+  setStatus('Classifying transactions — please wait…','info');
+  if(uploadBtn){uploadBtn.disabled=true;uploadBtn.textContent='⏳ Working…';}
+  await _ensureLedgerKeys();
+  const acctName=(document.getElementById('acct_name').value||'').trim()||'main';
+  const filePassword=(document.getElementById('file_password').value||'').trim();
+  const fd=new FormData();fd.append('file',_file);fd.append('account_id',acctName);if(filePassword)fd.append('password',filePassword);
+  try{
+    const controller = new AbortController();
+    const timeoutId = setTimeout(()=>controller.abort(), 120000);
+    const r=await fetch('/upload-pending',{method:'POST',body:fd,signal:controller.signal});
+    clearTimeout(timeoutId);
+    const raw = await r.text();
+    let d = {};
+    try { d = raw ? JSON.parse(raw) : {}; }
+    catch(parseErr) {
+      console.error('Server response parse error:', parseErr, 'Raw:', raw);
+      setStatus('Server error: invalid JSON response. Check server logs.','err');
+      return;
+    }
+    if(!r.ok && !d.error){ d.error = 'Upload failed with HTTP ' + r.status; }
+    if(d.profile_required){
+      await refreshProfileGate({focusProfile:true, message:_profileGateText(d.missing_reason || '')});
+      setStatus('❌ ' + _profileGateText(d.missing_reason || ''), 'err');
+      return;
+    }
+    if(d.error){
+      setStatus('❌ ' + d.error + (d.warnings && d.warnings.length ? '  |  ' + d.warnings.join(' | ') : ''), 'err');
+      return;
+    }
+    if(d.ok === false){
+      const warn = (d.warnings && d.warnings.length) ? d.warnings.join(' | ') : 'No transactions found.';
+      setStatus('⚠️ ' + warn, 'err');
+      return;
+    }
+    if(d.warnings && d.warnings.length){ setStatus('⚠️ ' + d.warnings.join(' | '), 'info'); }
+    if(!d.staged || d.staged === 0){
+      setStatus('⚠️ No transactions found in the file. Check file format or that it has data rows.', 'info');
+      return;
+    }
+    _allReviewRows = Array.isArray(d.transactions) ? d.transactions : [];
+    _reviewVisibleCount = _reviewPageSize;
+    _reviewRowsPrefetched = _allReviewRows.slice();
+    setStatus(`✅ ${d.staged} transactions classified (account: ${d.account_id||acctName}) — review & approve in the Review tab`,'ok');
+    loadAccountDropdowns();
+    refreshUploadedFiles();
+    tab('review');
+    clearUpload();
+  }catch(e){
+    const msg = (e && e.name==='AbortError') ? 'Upload timed out. Check server logs and try again.' : ('Upload failed: '+e);
+    setStatus(msg,'err');
+  }
+  finally{if(uploadBtn){uploadBtn.disabled=false;uploadBtn.textContent='🔍 Classify & Review';}}
+}
+
+// ── Review tab ────────────────────────────────────────────────────────────────
+let _allReviewRows = [];
+let _reviewRowsPrefetched = null;
+let _ledgerKeys = [];   // loaded once from /ledger-keys
+let _ledgerKeyOptionsBaseHtml = '';
+let _reviewPageSize = 100;
+let _reviewVisibleCount = 100;
+
+function _invalidateLedgerKeyOptionsCache(){ _ledgerKeyOptionsBaseHtml = ''; }
+
+async function _ensureLedgerKeys(){
+  if(_ledgerKeys.length) return;
+  try{
+    const r = await fetch('/ledger-keys');
+    _ledgerKeys = await r.json();
+    _invalidateLedgerKeyOptionsCache();
+  }catch(e){ _ledgerKeys = []; }
+}
+
+async function loadReview(){
+  await _ensureLedgerKeys();
+  let rows = [];
+  if(Array.isArray(_reviewRowsPrefetched)){
+    rows = _reviewRowsPrefetched.slice();
+    _reviewRowsPrefetched = null;
+    if(rows.length){ _allReviewRows = rows; _reviewVisibleCount = _reviewPageSize; renderReviewRows(rows); return; }
+  }
+  try{
+    const r = await fetch('/pending?limit=500');
+    if(!r.ok){
+      const errText = await r.text();
+      console.error('GET /pending failed:', r.status, errText);
+      showReviewEmpty();
+      const rs=document.getElementById('review-status');
+      if(rs){rs.style.display='block';rs.className='alert alert-err';rs.textContent='Failed to load pending transactions (HTTP '+r.status+').';}
+      return;
+    }
+    const data = await r.json();
+    if(!Array.isArray(data)){
+      console.error('GET /pending returned non-array:', data);
+      if(data && data.error){ showReviewError(data.error); return; }
+      showReviewEmpty();
+      return;
+    }
+    rows = data;
+  }catch(e){
+    console.error('loadReview error:', e);
+    showReviewEmpty();
+    return;
+  }
+  if(rows && rows.length){ _allReviewRows = rows; _reviewVisibleCount = _reviewPageSize; renderReviewRows(rows); } else showReviewEmpty();
+}
+
+function showReviewError(msg){
+  const ab=document.getElementById('review-action-bar'); if(ab)ab.style.display='none';
+  const rc=document.getElementById('review-rows-container'); if(rc)rc.style.display='none';
+  const re=document.getElementById('review-empty'); if(re)re.style.display='none';
+  const rs=document.getElementById('review-status');
+  if(rs){rs.style.display='block';rs.className='alert alert-err';rs.textContent='Error: '+msg;}
+}
+
+function showReviewEmpty(msg=''){
+  const actionBar=document.getElementById('review-action-bar');
+  const rowsContainer=document.getElementById('review-rows-container');
+  const empty=document.getElementById('review-empty');
+  const rs=document.getElementById('review-status');
+  if(actionBar)actionBar.style.display='none';
+  if(rowsContainer)rowsContainer.style.display='none';
+  if(empty){
+    empty.style.display='block';
+    empty.innerHTML = `<div style="text-align:center;padding:30px;color:#888;font-size:13px">${msg || 'No transactions to review yet.'}</div>`;
+  }
+  if(rs)rs.style.display='none';
+}
+
+function filterReview(){
+  const q=(document.getElementById('rv-search').value||'').toLowerCase();
+  const st=document.getElementById('rv-filter-status').value;
+  const bk=document.getElementById('rv-filter-book').value;
+  const filtered=_allReviewRows.filter(r=>{
+    if(st && r.status!==st) return false;
+    if(bk && r.book!==bk) return false;
+    if(q){
+      const narr=(r.narration||'').toLowerCase();
+      const cp=(r.counterparty||'').toLowerCase();
+      if(!narr.includes(q)&&!cp.includes(q)) return false;
+    }
+    return true;
+  });
+  _reviewVisibleCount = _reviewPageSize;
+  renderReviewRows(filtered, /*skipCounterUpdate=*/true);
+}
+
+function _buildKeyOptions(currentKey){
+  // Group options by book > section
+  const groups={};
+  _ledgerKeys.forEach(k=>{
+    const g=k.book+'___'+k.section;
+    if(!groups[g]) groups[g]={label:`${k.book.replace('_',' ')} › ${k.section}`, opts:[]};
+    groups[g].opts.push(k);
+  });
+  let html='<option value="">— pick category —</option>';
+  for(const [, grp] of Object.entries(groups)){
+    html+=`<optgroup label="${grp.label}">`;
+    grp.opts.forEach(k=>{
+      const sel = k.key===currentKey ? 'selected' : '';
+      html+=`<option value="${k.key}" ${sel}>${k.key} · ${k.account}</option>`;
+    });
+    html+='</optgroup>';
+  }
+  return html;
+}
+
+function downloadStmt(which){
+  const map = {
+    income:      { id: 'stmt-income-body',      file: 'income_statement.txt' },
+    income_acct: { id: 'stmt-income-acct-body', file: 'income_statement_this_account.txt' },
+    balance:     { id: 'stmt-balance-body',     file: 'balance_sheet.txt' },
+    balance_acct:{ id: 'stmt-balance-acct-body',file: 'balance_sheet_this_account.txt' },
+    pl:          { id: 'stmt-pl-body',          file: 'profit_loss.txt' },
+    pl_acct:     { id: 'stmt-pl-acct-body',     file: 'profit_loss_this_account.txt' },
+  };
+  const cfg = map[which];
+  if(!cfg){ alert('Unknown statement type'); return; }
+
+  const el = document.getElementById(cfg.id);
+  if(!el){ alert('Statement not found'); return; }
+
+  const text = (el.innerText || el.textContent || '').trim();
+  if(!text){
+    alert('No statement data to download.');
+    return;
+  }
+
+  const blob = new Blob([text], {type:'text/plain;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = cfg.file;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function downloadYearPdf(report, year){
+  const account_id = (document.getElementById('stmt_account') || {value:''}).value || '';
+  const date_from = `${year}-01-01`;
+  const date_to   = `${year}-12-31`;
+
+  const qs = new URLSearchParams({
+    kind: 'detailed',
+    report: report || '',
+    date_from,
+    date_to,
+    account_id
+  });
+
+  try{
+    const res = await fetch('/download-report-pdf?' + qs.toString(), {
+      method: 'GET',
+      credentials: 'same-origin'
+    });
+
+    if(!res.ok){
+      const msg = await res.text();
+      alert('PDF download failed: ' + msg);
+      return;
+    }
+
+    const blob = await res.blob();
+    const cd = res.headers.get('Content-Disposition') || '';
+    let filename = `${report || 'report'}_${year}.pdf`;
+    const m = cd.match(/filename=\"?([^"]+)\"?/i);
+    if(m && m[1]) filename = m[1];
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }catch(e){
+    alert('PDF download failed: ' + e);
+  }
+}
+
+async function onAccountChange(){
+  await populateYearDropdown();
+  await refreshStmts();
+}
+
+async function viewYearStatement(report, fyStart){
+  const fy = parseInt(fyStart, 10);
+  const df = document.getElementById('stmt_date_from');
+  const dt = document.getElementById('stmt_date_to');
+  const yr = document.getElementById('stmt_year');
+
+  if(df) df.value = `${fy}-04-01`;
+  if(dt) dt.value = `${fy + 1}-03-31`;
+  if(yr) yr.value = String(fy);
+
+  await refreshStmts();
+
+  if(report === 'income_statement') showStmt('income');
+  else if(report === 'balance_sheet') showStmt('balance');
+  else if(report === 'profit_loss') showStmt('pl');
+}
+
+async function loadYearlyStatements(){
+  const account_id=(document.getElementById('stmt_account')||{value:''}).value||'';
+  const qs = new URLSearchParams({account_id});
+  const r = await fetch('/financial-reports-yearly?' + qs.toString(), {credentials:'same-origin'});
+  const d = await r.json();
+  if(d.error){ alert(d.error); return; }
+
+  const years = Object.keys(d).sort().reverse();
+  let html = '';
+  for(const yr of years){
+    const fy = parseInt(yr, 10);
+    const fyLabel = `FY ${fy}-${String(fy + 1).slice(-2)}`;
+    html += `
+      <div style="border:1px solid #ddd;border-radius:10px;padding:10px;margin:8px 0;background:#fff">
+        <div style="font-weight:700;margin-bottom:8px">${fyLabel}</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button onclick="downloadYearPdf('income_statement','${yr}')">Income PDF</button>
+          <button onclick="downloadYearPdf('balance_sheet','${yr}')">Balance Sheet PDF</button>
+          <button onclick="viewYearStatement('income_statement','${yr}')">View Income</button>
+          <button onclick="viewYearStatement('balance_sheet','${yr}')">View Balance Sheet</button>
+        </div>
+      </div>
+    `;
+  }
+  document.getElementById('yearly-reports-wrap').innerHTML = html || '<div>No yearly reports found</div>';
+}
+
+async function populateYearDropdown(){
+  const account_id=(document.getElementById('stmt_account')||{value:''}).value||'';
+  const sel=document.getElementById('stmt_year');
+  if(!sel) return;
+
+  try{
+    const qs = new URLSearchParams({account_id});
+    const r = await fetch('/financial-reports-yearly?' + qs.toString(), {credentials:'same-origin'});
+    const d = await r.json();
+    if(!r.ok || d.error){
+      sel.innerHTML = '<option value="">All Financial Years</option>';
+      return;
+    }
+
+    const years = Object.keys(d).sort().reverse();
+    const current = sel.value || '';
+    let html = '<option value="">All Financial Years</option>';
+
+    years.forEach(yr => {
+      const fy = parseInt(yr, 10);
+      const fyLabel = `FY ${fy}-${String(fy + 1).slice(-2)}`;
+      html += `<option value="${fy}" ${current===String(fy)?'selected':''}>${fyLabel}</option>`;
+    });
+
+    sel.innerHTML = html;
+  }catch(e){
+    sel.innerHTML = '<option value="">All Financial Years</option>';
+  }
+}
+
+function applyYearFilter(){
+  const fyStart = parseInt((document.getElementById('stmt_year')||{value:''}).value || '', 10);
+  const df = document.getElementById('stmt_date_from');
+  const dt = document.getElementById('stmt_date_to');
+
+  if(!df || !dt) return;
+
+  if(!fyStart){
+    df.value = '';
+    dt.value = '';
+  }else{
+    const fyEnd = fyStart + 1;
+    df.value = `${fyStart}-04-01`;
+    dt.value = `${fyEnd}-03-31`;
+  }
+  refreshStmts();
+}
+
+function downloadYearPdf(report, fyStart){
+  const account_id = (document.getElementById('stmt_account') || {value:''}).value || '';
+  const fy = parseInt(fyStart, 10);
+  const date_from = `${fy}-04-01`;
+  const date_to   = `${fy + 1}-03-31`;
+
+  downloadReportPdf('detailed', report, date_from, date_to, account_id);
+}
+
+function renderReviewRows(rows, skipCounterUpdate=false){
+  if(!Array.isArray(rows)) rows=[];
+  const originalRows = rows.slice();
+  if(!skipCounterUpdate){
+    _allReviewRows=originalRows;
+    document.getElementById('rv-total').textContent=originalRows.length;
+    document.getElementById('rv-reclassified').textContent=originalRows.filter(r=>r.status==='RECLASSIFIED').length+' reclassified';
+    document.getElementById('rv-anomaly').textContent=originalRows.filter(r=>r.is_anomaly).length+' anomalies';
+  }
+  document.getElementById('review-empty').style.display='none';
+  document.getElementById('review-action-bar').style.display='block';
+  document.getElementById('review-rows-container').style.display='block';
+
+  // FIX B5: Guard — if ledger keys failed to load, dropdowns will be disabled
+  const keysAvailable = Array.isArray(_ledgerKeys) && _ledgerKeys.length > 0;
+  if(!keysAvailable){
+    console.warn('renderReviewRows: ledger keys not loaded — dropdowns will be disabled');
+  }
+
+  const container=document.getElementById('review-rows');
+  if(!originalRows.length){container.innerHTML='<div style="text-align:center;padding:30px;color:#aaa;font-size:13px">No rows match your filter.</div>';return;}
+  const rowsToRender = originalRows.slice(0, Math.max(_reviewVisibleCount, _reviewPageSize));
+
+  const BOOK_BADGE={
+    BALANCE_SHEET:'background:#e3f2fd;color:#0d47a1;border:1px solid #bbdefb',
+    INCOME_EXPENSE:'background:#e8f5e9;color:#1b5e20;border:1px solid #c8e6c9',
+    SUSPENSE:'background:#fff3e0;color:#e65100;border:1px solid #ffe0b2',
+  };
+
+  container.innerHTML = rowsToRender.map((r,i)=>{
+    const activeKey = r.reclassified_key||r.predicted_ledger_key||'';
+    const bb = BOOK_BADGE[r.book]||'background:#f5f5f5;color:#555;border:1px solid #ddd';
+    const isReclass = r.status==='RECLASSIFIED';
+    const isAnomaly = r.is_anomaly;
+    const amt = parseFloat(r.amount||0).toLocaleString('en-IN',{minimumFractionDigits:2});
+    const amtColor = r.txn_type==='credit'?'#1b5e20':'#b71c1c';
+    const narrDisplay = (r.narration || r.description || '—').trim() || '—';
+    const cpRaw = (r.counterparty||'').trim();
+    const cpDisplay = cpRaw || '—';
+    const statusDot = isReclass
+      ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#f57f17;margin-right:5px"></span>'
+      : '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#1565c0;margin-right:5px"></span>';
+    const anomalyBadge = isAnomaly ? '<span style="font-size:10px;background:#fce4ec;color:#c62828;border:1px solid #ef9a9a;border-radius:4px;padding:1px 6px;margin-left:6px">⚠ anomaly</span>' : '';
+
+    return `<div class="card" id="rvr-${r.id}" style="margin-bottom:10px;padding:14px 18px;${isReclass?'border-left:4px solid #f57f17':'border-left:4px solid #e0e0e0'}">
+      <!-- Row header: index, date, amount, type, status -->
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span style="font-size:11px;color:#aaa;font-weight:600;min-width:22px">#${i+1}</span>
+          <span style="font-size:12px;color:#666;font-weight:600;font-family:monospace">${r.txn_date||'—'}</span>
+          <span class="badge ${r.txn_type==='credit'?'b-cr':'b-dr'}">${r.txn_type||''}</span>
+          <span style="font-size:14px;font-weight:800;color:${amtColor}">₹${amt}</span>
+          ${anomalyBadge}
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span style="font-size:10px;padding:2px 8px;border-radius:5px;font-weight:700;${bb}">${r.book||''}</span>
+          <span style="font-size:11px;font-weight:700">${statusDot}${r.status}</span>
+        </div>
+      </div>
+
+      <!-- Compact review row -->
+      <div style="margin-bottom:8px">
+        <div style="font-size:12px;color:#555;display:flex;align-items:flex-start;gap:6px;flex-wrap:nowrap">
+          <span style="font-size:10px;background:#eef3ff;border-radius:4px;padding:1px 7px;color:#4a6fa5;font-weight:600;text-transform:uppercase;letter-spacing:.3px;flex:0 0 auto">Narration</span>
+          <span style="font-weight:500;color:#333;word-break:break-word;line-height:1.45">${narrDisplay}</span>
+        </div>
+      </div>
+      <div style="margin-bottom:10px">
+        <div style="font-size:12px;color:#555;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <span style="font-size:10px;background:#f0f0f0;border-radius:4px;padding:1px 7px;color:#777;font-weight:600;text-transform:uppercase;letter-spacing:.3px">Counterparty</span>
+          <span style="font-weight:600;color:#333">${cpDisplay}</span>
+        </div>
+      </div>
+
+      <!-- Reclassify dropdown -->
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="display:none"></span>
+        ${keysAvailable
+          ? `<select id="rk-${r.id}"
+              style="flex:1;min-width:220px;max-width:520px;padding:7px 10px;border:1.5px solid ${isReclass?'#f57f17':'#e0e0e0'};border-radius:7px;font-size:12px;font-family:monospace;background:#fff"
+              onchange="doReclassifyDropdown('${r.id}', this.value)">
+              ${_buildKeyOptions(activeKey)}
+            </select>`
+          : `<select disabled style="flex:1;min-width:220px;padding:7px 10px;border:1.5px solid #ddd;border-radius:7px;font-size:12px;background:#f5f5f5;color:#aaa">
+              <option>Categories loading — retry Review tab</option>
+             </select>`
+        }
+        <button class="btn bo" onclick="saveCustomRuleFromRow('${r.id}')">💾 Save as rule</button>
+        <span style="font-size:11px;color:#aaa">Current: <code style="background:#f0f4ff;padding:1px 6px;border-radius:3px;color:#1565c0">${activeKey}</code></span>
+      </div>
+    </div>`;
+  }).join('');
+  if(originalRows.length > rowsToRender.length){
+    container.innerHTML += `<div style="text-align:center;padding:14px"><button class="btn bo" onclick="_reviewVisibleCount += _reviewPageSize; filterReview();">Show more (${originalRows.length - rowsToRender.length} remaining)</button></div>`;
+  }
+}
+
+async function doReclassifyDropdown(id, newKey){
+  if(!newKey) return;
+
+  const sel = document.getElementById('rk-' + id);
+  if(sel) sel.disabled = true;
+
+  try{
+    const r = await fetch('/reclassify', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ txn_id: id, new_key: newKey })
+    });
+
+    const d = await r.json();
+
+    if(d.error){
+      alert('❌ ' + d.error);
+      if(sel) sel.disabled = false;
+      return;
+    }
+
+    const idx = _allReviewRows.findIndex(x => x.id === id);
+    if(idx >= 0){
+      _allReviewRows[idx] = {
+        ..._allReviewRows[idx],
+        ...d,
+        reclassified_key: newKey,
+        status: 'RECLASSIFIED'
+      };
+    }
+
+    document.getElementById('rv-reclassified').textContent =
+      _allReviewRows.filter(r => r.status === 'RECLASSIFIED').length + ' reclassified';
+
+    filterReview();
+
+  }catch(e){
+    alert('Error: ' + e);
+    if(sel) sel.disabled = false;
+  }
+}
+
+async function saveCustomRuleFromRow(id){
+  const row = _allReviewRows.find(x => x.id === id);
+  if(!row){ alert('Row not found'); return; }
+
+  const sel = document.getElementById('rk-' + id);
+  const activeKey =
+    (sel && sel.value ? sel.value : '') ||
+    row.reclassified_key ||
+    row.predicted_ledger_key ||
+    '';
+
+  if(!activeKey){ alert('Pick a category first'); return; }
+
+  const suggested = (row.counterparty || row.narration || '').trim();
+  const pattern = prompt(
+    'Save auto-classification rule.\n\nEnter text to match in future narrations:',
+    suggested
+  );
+  if(pattern === null) return;
+
+  const match_mode = 'contains';
+  const txn_type = row.txn_type || '';
+
+  try{
+    const r = await fetch('/add-custom-rule', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        pattern,
+        ledger_key: activeKey,
+        txn_type,
+        match_mode,
+        priority: 100
+      })
+    });
+    const d = await r.json();
+    if(d.error){ alert('❌ ' + d.error); return; }
+    alert(`✅ Rule saved\n\n"${pattern}" → ${activeKey}`);
+  }catch(e){
+    alert('Failed to save rule: ' + e);
+  }
+}
+
+async function addCustomRule() {
+  const pattern = document.getElementById('rule-pattern').value.trim();
+  const ledger_key = document.getElementById('rule-ledger-key').value;
+  const match_mode = document.getElementById('rule-match-mode').value;
+  const txn_type = document.getElementById('rule-txn-type').value;
+  if (!pattern || !ledger_key) { alert('Pattern and ledger key required'); return; }
+  const r = await fetch('/add-custom-rule', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({pattern, ledger_key, match_mode, txn_type, priority: 50})
+  });
+  const d = await r.json();
+  document.getElementById('rule-save-msg').textContent = d.ok ? '✅ Rule saved!' : ('❌ ' + d.error);
+  setTimeout(() => document.getElementById('rule-save-msg').textContent = '', 3000);
+}
+// Populate ledger key dropdown on load
+fetch('/ledger-keys').then(r=>r.json()).then(keys=>{
+  const sel = document.getElementById('rule-ledger-key');
+  if (!sel) return;
+  keys.forEach(k=>{ const o=document.createElement('option'); o.value=k.key; o.textContent=k.key; sel.appendChild(o); });
+});
+
+async function approveAll(){
+  if(!confirm('Approve all transactions and post to ledger?\n\nReclassified rows will use the new category. All others keep the predicted category.')) return;
+  const btn=document.querySelector('#review-action-bar .btn.bg');
+  if(btn){btn.disabled=true;btn.textContent='⏳ Posting…';}
+  try{
+    const r=await fetch('/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    const d=await r.json();
+    if(d.error){alert('Error: '+d.error);return;}
+    _allReviewRows=[];
+    showReviewEmpty();
+    const rs=document.getElementById('review-status');
+    rs.style.display='block';rs.className='alert alert-ok';
+    rs.textContent=`✅ ${d.approved} transactions posted. Opening Statements…`;
+    if(d.reports)renderStatements(d.reports);
+    refreshUploadedFiles();
+    setTimeout(()=>tab('statements'),700);
+  }catch(e){alert('Approve failed: '+e);}
+  finally{if(btn){btn.disabled=false;btn.textContent='✅ Approve All & Post to Ledger';}}
+}
+
+async function discardPending(){
+  if(!confirm('Discard this batch? All staged transactions will be deleted.')) return;
+  await fetch('/discard-pending',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  showReviewEmpty();
+}
+
+// ── Financial Statements ──────────────────────────────────────────────────────
+let _lastReports={};
+
+function showStmt(which){
+  ['income','balance','pl'].forEach(k=>{
+    const el=document.getElementById('stmt-'+k);
+    if(el)el.style.display=(which==='all'||which===k)?'block':'none';
+  });
+  document.getElementById('stmt-empty').style.display='none';
+}
+
+function _extractChips(text){
+  /* Scan the raw report text for key totals and return chip data */
+  const chips=[];
+  const patterns=[
+    {re:/TOTAL INCOME\s+₹([\d,]+\.\d+)/,label:'Total Income',color:'#1b5e20',bg:'#e8f5e9'},
+    {re:/TOTAL EXPENSES\s+₹([\d,]+\.\d+)/,label:'Total Expenses',color:'#b71c1c',bg:'#ffebee'},
+    {re:/NET INCOME[^\n]+₹([\d,]+\.\d+)/,label:'Net Income',color:'#0d47a1',bg:'#e3f2fd'},
+    {re:/TOTAL REVENUE\s+₹([\d,]+\.\d+)/,label:'Revenue',color:'#1b5e20',bg:'#e8f5e9'},
+    {re:/NET PROFIT[^\n]+₹([\d,]+\.\d+)/,label:'Net Profit',color:'#0d47a1',bg:'#e3f2fd'},
+    {re:/ESTIMATED NET WORTH[^\n]+₹([\d,]+\.\d+)/,label:'Net Worth',color:'#6a1b9a',bg:'#f3e5f5'},
+    {re:/TOTAL ASSETS\s+₹([\d,]+\.\d+)/,label:'Total Assets',color:'#0d47a1',bg:'#e3f2fd'},
+    {re:/TOTAL LIABILITIES\s+₹([\d,]+\.\d+)/,label:'Total Liabilities',color:'#b71c1c',bg:'#ffebee'},
+  ];
+  patterns.forEach(({re,label,color,bg})=>{
+    const m=text.match(re);
+    if(m)chips.push({label,value:'₹'+m[1],color,bg});
+  });
+  return chips;
+}
+
+function _renderChips(chips,containerId){
+  const el=document.getElementById(containerId);
+  if(!el)return;
+  el.innerHTML=chips.map(c=>`
+    <div style="background:${c.bg};border:1.5px solid ${c.color}33;border-radius:10px;padding:8px 16px;min-width:120px">
+      <div style="font-size:11px;color:#666;font-weight:600;letter-spacing:.3px;text-transform:uppercase">${c.label}</div>
+      <div style="font-size:15px;font-weight:800;color:${c.color};margin-top:2px">${c.value}</div>
+    </div>`).join('');
+}
+function renderStatements(reports, acctReports, selectedAcctId){
+  // reports      = combined (all accounts) data
+  // acctReports  = per-account data (null if no account selected)
+  // selectedAcctId = account_id string or null
+  reports = reports || {};
+  _lastReports = reports;
+  if(acctReports) _lastReports._acct = acctReports;
+  if(selectedAcctId) _lastReports._acctId = selectedAcctId;
+
+  const incomeWrap   = document.getElementById('stmt-income');
+  const incomeBody   = document.getElementById('stmt-income-body');
+  const balanceWrap  = document.getElementById('stmt-balance');
+  const balanceBody  = document.getElementById('stmt-balance-body');
+  const plWrap       = document.getElementById('stmt-pl');
+  const plBody       = document.getElementById('stmt-pl-body');
+  const emptyWrap    = document.getElementById('stmt-empty');
+
+  const isSplit = !!(acctReports && selectedAcctId);
+  _toggleStmtAccountButtons(isSplit);
+  // ── Period label: extract from statement text (Fix 1) ──────────────────────
+  const from = (document.getElementById('stmt_date_from') || {}).value || '';
+  const to   = (document.getElementById('stmt_date_to')   || {}).value || '';
+  const acct = selectedAcctId || (document.getElementById('stmt_account') || {}).value || '';
+  const fallbackLabel = [
+    from && to ? `${from} to ${to}` : (from ? `From ${from}` : (to ? `Up to ${to}` : 'All dates')),
+    acct ? `Account: ${acct}` : 'All accounts'
+  ].join(' • ');
+  const incomePeriod  = document.getElementById('stmt-income-period');
+  const balancePeriod = document.getElementById('stmt-balance-period');
+  const plPeriod      = document.getElementById('stmt-pl-period');
+  const _pLabel = (txt, suffix) => {
+    const p = _extractStmtPeriod(txt);
+    return (p || `Period: ${fallbackLabel}`) + (suffix ? `  |  ${suffix}` : '');
+  };
+  const combinedSuffix = isSplit ? `Showing: All Accounts vs ${selectedAcctId}` : '';
+  const incomeTxt  = isSplit ? ((acctReports && acctReports.income_statement) || '') : reports.income_statement;
+  const balanceTxt = isSplit ? ((acctReports && acctReports.balance_sheet) || '') : reports.balance_sheet;
+  const plTxt      = isSplit ? ((acctReports && acctReports.profit_loss) || '') : reports.profit_loss;
+  console.log('[STMT PERIOD TEXT SOURCE]', {isSplit, selectedAcctId, incomeTxt, balanceTxt, plTxt});
+
+  if(incomePeriod)  incomePeriod.textContent  = _pLabel(incomeTxt,  combinedSuffix);
+  if(balancePeriod) balancePeriod.textContent = _pLabel(balanceTxt, combinedSuffix);
+  if(plPeriod)      plPeriod.textContent      = _pLabel(plTxt,      combinedSuffix);
+
+  if(incomeWrap)  incomeWrap.style.display  = 'none';
+  if(balanceWrap) balanceWrap.style.display = 'none';
+  if(plWrap)      plWrap.style.display      = 'none';
+
+  // Helper: toggle split vs single view
+  function _toggleSplitView(key, show){
+    const splitEl  = document.getElementById(`stmt-${key}-split`);
+    const singleEl = document.getElementById(`stmt-${key}-single`);
+    if(splitEl)  splitEl.style.display  = show ? 'block' : 'none';
+    if(singleEl) singleEl.style.display = show ? 'none'  : 'block';
+  }
+
+  let any = false;
+  try {
+    // ── Income Statement ──────────────────────────────────────────────────────
+    if ((reports.income_statement || (acctReports && acctReports.income_statement)) && incomeWrap) {
+      incomeWrap.style.display = 'block';
+      _toggleSplitView('income', isSplit);
+      if(isSplit){
+        // Per-account panel
+        const acctLbl = document.getElementById('stmt-income-acct-label');
+        if(acctLbl) acctLbl.textContent = `📄 ${selectedAcctId}`;
+        document.getElementById('stmt-income-acct-body').innerHTML = stmtHtml(acctReports.income_statement || '(no data)');
+        _renderChips(_extractChips(acctReports.income_statement || ''), 'stmt-income-acct-chips');
+        // Combined panel
+        document.getElementById('stmt-income-all-body').innerHTML = stmtHtml(reports.income_statement || '(no data)');
+        _renderChips(_extractChips(reports.income_statement || ''), 'stmt-income-all-chips');
+        // Top-level chips = combined
+        _renderChips(_extractChips(reports.income_statement || ''), 'stmt-income-chips');
+      } else {
+        if(incomeBody) incomeBody.innerHTML = stmtHtml(reports.income_statement);
+        _renderChips(_extractChips(reports.income_statement), 'stmt-income-chips');
+      }
+      any = true;
+    }
+
+    // ── Balance Sheet ─────────────────────────────────────────────────────────
+    if ((reports.balance_sheet || (acctReports && acctReports.balance_sheet)) && balanceWrap) {
+      balanceWrap.style.display = 'block';
+      _toggleSplitView('balance', isSplit);
+      if(isSplit){
+        const acctLbl = document.getElementById('stmt-balance-acct-label');
+        if(acctLbl) acctLbl.textContent = `📄 ${selectedAcctId}`;
+        document.getElementById('stmt-balance-acct-body').innerHTML = stmtHtml(acctReports.balance_sheet || '(no data)');
+        _renderChips(_extractChips(acctReports.balance_sheet || ''), 'stmt-balance-acct-chips');
+        document.getElementById('stmt-balance-all-body').innerHTML = stmtHtml(reports.balance_sheet || '(no data)');
+        _renderChips(_extractChips(reports.balance_sheet || ''), 'stmt-balance-all-chips');
+        _renderChips(_extractChips(reports.balance_sheet || ''), 'stmt-balance-chips');
+      } else {
+        if(balanceBody) balanceBody.innerHTML = stmtHtml(reports.balance_sheet);
+        _renderChips(_extractChips(reports.balance_sheet), 'stmt-balance-chips');
+      }
+      any = true;
+    }
+
+    // ── Profit & Loss ─────────────────────────────────────────────────────────
+    if ((reports.profit_loss || (acctReports && acctReports.profit_loss)) && plWrap) {
+      plWrap.style.display = 'block';
+      _toggleSplitView('pl', isSplit);
+      if(isSplit){
+        const acctLbl = document.getElementById('stmt-pl-acct-label');
+        if(acctLbl) acctLbl.textContent = `📄 ${selectedAcctId}`;
+        document.getElementById('stmt-pl-acct-body').innerHTML = stmtHtml(acctReports.profit_loss || '(no data)');
+        _renderChips(_extractChips(acctReports.profit_loss || ''), 'stmt-pl-acct-chips');
+        document.getElementById('stmt-pl-all-body').innerHTML = stmtHtml(reports.profit_loss || '(no data)');
+        _renderChips(_extractChips(reports.profit_loss || ''), 'stmt-pl-all-chips');
+        _renderChips(_extractChips(reports.profit_loss || ''), 'stmt-pl-chips');
+      } else {
+        if(plBody) plBody.innerHTML = stmtHtml(reports.profit_loss);
+        _renderChips(_extractChips(reports.profit_loss), 'stmt-pl-chips');
+      }
+      any = true;
+    }
+
+  } catch (e) {
+    console.error('renderStatements failed', e, reports);
+    if (emptyWrap) {
+      emptyWrap.style.display = 'block';
+      emptyWrap.innerHTML = `<div style="color:#b71c1c;font-size:13px">Statement rendering failed: ${String(e)}</div>`;
+    }
+    return;
+  }
+
+  if (emptyWrap) {
+    emptyWrap.style.display = any ? 'none' : 'block';
+    if (!any) {
+      const err = reports.error ? `<div style="color:#b71c1c;font-size:13px;margin-top:6px">${reports.error}</div>` : '';
+      emptyWrap.innerHTML = `<div>No statement data available for the selected filters.</div>${err}`;
+    }
+  }
+}
+
+function _parseTraceMeta(line){
+  const m=line.match(/\[TRACE:([^\]]+)\]/);
+  if(!m) return null;
+  const parts=m[1].split(':');
+  if(parts[0]==='bank_balance') return {type:'bank_balance'};
+  if(parts.length>=4) return {type:'bucket',book:parts[0],section:parts[1],grp:parts[2],account:parts.slice(3).join(':')};
+  if(parts.length>=3) return {type:'bucket',book:parts[0],section:parts[1],grp:parts[2]};
+  return null;
+}
+
+// ── Statement renderer with counterparty grouping ─────────────────────────────
+let _stmtDetailCounter = 0; // unique IDs for expand/collapse toggles
+
+function _parseDetailLine(line) {
+  // Matches:  │  2025-12-14  Counterparty Name  |  narration...  CR  ₹ 1,234.56
+  // Note: _fmt() pads with spaces after ₹ so we allow \s* between ₹ and digits
+  const m = line.match(/^\s*│\s+(\d{4}-\d{2}-\d{2})\s+(.+?)\s+\|\s+(.+?)\s+(CR|DR)\s+(₹[\s\d,]+\.\d+)\s*$/);
+  if (m) return { date: m[1], counterparty: m[2].trim(), narration: m[3].trim(), dir: m[4], amount: m[5].trim() };
+  // Fallback: synthetic lines like bank balance breakdown
+  const m2 = line.match(/^\s*│\s+(.+)$/);
+  if (m2) return { raw: m2[1].trim() };
+  return null;
+}
+
+function _amountToNum(s) {
+  return parseFloat((s||'').replace(/[₹,\s]/g,'')) || 0;
+}
+
+function _escapeHtmlAttr(s){
+  return String(s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function openTraceFromBtn(btn){
+  try{
+    const title = btn.getAttribute('data-trace-title') || 'Trace';
+    const raw = btn.getAttribute('data-trace-params') || '{}';
+    const params = JSON.parse(raw);
+    return openTrace(title, params);
+  }catch(e){
+    console.error('trace button failed', e);
+    alert('Trace could not be opened for this line.');
+  }
+}
+
+function _renderDetailGroup(lines, blockId) {
+  const parsed = lines.map(_parseDetailLine).filter(Boolean);
+  if (!parsed.length) return '';
+
+  const rawLines = parsed.filter(p => p.raw);
+  const txnLines = parsed.filter(p => p.date);
+
+  // Group by counterparty — case-insensitive key, preserve first-seen label
+  const groupMap = {};
+  txnLines.forEach(t => {
+    const raw   = (t.counterparty || '').trim();
+    const label = raw || 'Unknown / Unmapped';
+    const key   = label.toLowerCase();
+    if (!groupMap[key]) groupMap[key] = { label, net: 0, hasCR: false, hasDR: false };
+    const amt = _amountToNum(t.amount);
+    // CR = positive (inflow), DR = negative (outflow)
+    groupMap[key].net += (t.dir === 'CR' ? amt : -amt);
+    if (t.dir === 'CR') groupMap[key].hasCR = true;
+    else                groupMap[key].hasDR = true;
+  });
+
+  // Sort by absolute net descending
+  const sorted = Object.values(groupMap)
+    .sort((a, b) => Math.abs(b.net) - Math.abs(a.net));
+
+  let html = `<div id="${blockId}" style="display:none;margin:2px 0 6px 32px;border-left:2px solid #e3f2fd;padding-left:10px;padding-top:4px;padding-bottom:4px">`;
+
+  // Synthetic/raw lines (bank balance note etc.)
+  rawLines.forEach(r => {
+    html += `<div style="font-size:11px;color:#888;padding:2px 0;font-family:monospace">${r.raw.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</div>`;
+  });
+
+  // One row per counterparty — name left, net amount right, no drill-down
+  sorted.forEach(g => {
+    const isPositive = g.net >= 0;
+    const amtColor   = isPositive ? '#1b5e20' : '#b71c1c';
+    const amtFmt     = '₹' + Math.abs(g.net).toLocaleString('en-IN', {minimumFractionDigits:2});
+    const sign       = isPositive ? '+' : '−';
+    const dirLabel   = (g.hasCR && g.hasDR) ? 'NET' : g.hasCR ? 'CR' : 'DR';
+    html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 6px;border-bottom:1px solid #f5f5f5;border-radius:3px" onmouseover="this.style.background='#f9f9f9'" onmouseout="this.style.background=''">
+      <span style="font-size:12px;color:#333;font-weight:600">${g.label.replace(/&/g,'&amp;')}</span>
+      <span style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+        <span style="font-size:10px;color:#aaa">${dirLabel}</span>
+        <span style="font-size:12px;font-weight:800;color:${amtColor};min-width:90px;text-align:right">${sign} ${amtFmt}</span>
+      </span>
+    </div>`;
+  });
+
+  html += '</div>';
+  return html;
+}
+
+function stmtHtml(text){
+  const lines=(text||'').split('\n');
+  let html='<div style="font-family:\'Courier New\',monospace;font-size:12px;line-height:1.9;overflow-x:auto">';
+
+  // We process lines in two passes:
+  // When we hit a ├ account line, we collect all following │ detail lines
+  // and render them as a grouped expandable block.
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const traceMeta = _parseTraceMeta(line);
+    const e = line.replace(/\s*\[TRACE:[^\]]+\]/g,'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+
+    let traceBtn = '';
+    if (traceMeta) {
+      let onclick = '', label = '🔍 Trace';
+      if (traceMeta.type === 'bank_balance') {
+        const params = {account:'Bank Balance'};
+        traceBtn = `<button type="button" data-trace-title="${_escapeHtmlAttr('Bank Balance (All Transactions)')}" data-trace-params="${_escapeHtmlAttr(JSON.stringify(params))}" onclick="openTraceFromBtn(this)" style="font-size:10px;padding:1px 7px;margin-left:8px;background:#e3f2fd;border:1px solid #90caf9;border-radius:4px;color:#1565c0;cursor:pointer;font-family:sans-serif;vertical-align:middle">🔍 Bank Bal</button>`;
+      } else {
+        const t = `${traceMeta.section} › ${traceMeta.grp}${traceMeta.account ? ' › ' + traceMeta.account : ''}`;
+        const params = {book:traceMeta.book, section:traceMeta.section, grp:traceMeta.grp};
+        if (traceMeta.account) params.account = traceMeta.account;
+        traceBtn = `<button type="button" data-trace-title="${_escapeHtmlAttr(t)}" data-trace-params="${_escapeHtmlAttr(JSON.stringify(params))}" onclick="openTraceFromBtn(this)" style="font-size:10px;padding:1px 7px;margin-left:8px;background:#e3f2fd;border:1px solid #90caf9;border-radius:4px;color:#1565c0;cursor:pointer;font-family:sans-serif;vertical-align:middle">🔍 Trace</button>`;
+      }
+    }
+
+    // ── Account line (├) — collect following detail lines (│) ────────────────
+    if (/├/.test(line)) {
+      // Gather all consecutive │ lines after this ├ line
+      const detailLines = [];
+      let j = i + 1;
+      while (j < lines.length && /^\s*│/.test(lines[j])) {
+        detailLines.push(lines[j]);
+        j++;
+      }
+
+      const blockId = `stmt-detail-${++_stmtDetailCounter}`;
+      const hasDetail = detailLines.length > 0;
+
+      let expandBtn = '';
+      if (hasDetail) {
+        expandBtn = `<button onclick="toggleEl('${blockId}')" style="font-size:10px;padding:1px 7px;margin-left:8px;background:#f5f5f5;border:1px solid #ddd;border-radius:4px;color:#555;cursor:pointer;font-family:sans-serif;vertical-align:middle">▼ detail</button>`;
+      }
+
+      html += `<div style="color:#333">${e}${traceBtn}${expandBtn}</div>`;
+
+      if (hasDetail) {
+        html += _renderDetailGroup(detailLines, blockId);
+      }
+
+      i = j; // skip the │ lines we already consumed
+      continue;
+    }
+
+    // ── All other line types ──────────────────────────────────────────────────
+    if (/^\s*│/.test(line)) {
+      // Orphan │ line (not preceded by a ├) — skip, already consumed above
+      i++; continue;
+    }
+
+    if      (/^[═=]{5,}/.test(e.trim()))                                                      html+=`<div style="color:#1565c0;font-weight:800">${e}</div>`;
+    else if (/^[─\-]{5,}/.test(e.trim()))                                                     html+=`<div style="color:#ddd">${e}</div>`;
+    else if (/(TOTAL|NET INCOME|NET PROFIT|NET WORTH|EBITDA|EBIT)/.test(e)&&/₹/.test(e))     html+=`<div style="font-weight:800;color:#1b5e20;background:#f0fff4;padding:1px 4px;border-radius:3px">${e}</div>`;
+    else if (/(▌|INCOME|EXPENSES|REVENUE|ASSETS|LIABILITIES|EQUITY|TAXATION)/.test(e)&&e.length<80) html+=`<div style="font-weight:800;color:#1565c0;margin-top:6px">${e}</div>`;
+    else                                                                                       html+=`<div style="color:#555">${e}</div>`;
+
+    i++;
+  }
+  return html+'</div>';
+}
+
+function _extractStmtPeriod(text){
+  const lines=String(text||'').split('\n').map(s=>s.trim()).filter(Boolean);
+  const p=lines.find(l=>/^Period:/i.test(l));
+  if(p) return p;
+  const a=lines.find(l=>/^All transactions/i.test(l));
+  return a||'';
+}
+
+function _copyText(text, btn){
+  if(!text){alert('No data to copy.');return;}
+  function _fallback(){
+    const ta=document.createElement('textarea');
+    ta.value=text;ta.style.position='fixed';ta.style.opacity='0';
+    document.body.appendChild(ta);ta.focus();ta.select();
+    try{document.execCommand('copy');
+      if(btn){const o=btn.textContent;btn.textContent='✅ Copied!';setTimeout(()=>{btn.textContent=o;},1500);}
+    }catch(e){alert('Copy failed — please select and copy manually.');}
+    document.body.removeChild(ta);
+  }
+  if(navigator.clipboard&&window.isSecureContext){
+    navigator.clipboard.writeText(text).then(()=>{
+      if(btn){const o=btn.textContent;btn.textContent='✅ Copied!';setTimeout(()=>{btn.textContent=o;},1500);}
+    }).catch(_fallback);
+  } else { _fallback(); }
+}
+function copyStmt(which){
+  const map={income:'income_statement',balance:'balance_sheet',pl:'profit_loss',
+             income_acct:'income_statement',balance_acct:'balance_sheet',pl_acct:'profit_loss'};
+  const isAcct = which.endsWith('_acct');
+  const src = isAcct ? (_lastReports._acct||{}) : _lastReports;
+  const key = map[which]||which;
+  const text = src[key]||'';
+  _copyText(text, event.target);
+}
+
+function downloadStmt(which){
+  const map = {
+    income: 'income_statement',
+    balance: 'balance_sheet',
+    pl: 'profit_loss',
+    income_acct: 'income_statement',
+    balance_acct: 'balance_sheet',
+    pl_acct: 'profit_loss'
+  };
+
+  const isAcct = which.endsWith('_acct');
+  const src = isAcct ? (_lastReports._acct || {}) : _lastReports;
+  const key = map[which] || which;
+  const text = src[key] || '';
+
+  if(!text){
+    alert('No statement data to download.');
+    return;
+  }
+
+  const filenameMap = {
+    income: 'income_statement.txt',
+    balance: 'balance_sheet.txt',
+    pl: 'profit_loss.txt',
+    income_acct: 'income_statement_this_account.txt',
+    balance_acct: 'balance_sheet_this_account.txt',
+    pl_acct: 'profit_loss_this_account.txt'
+  };
+
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filenameMap[which] || 'statement.txt';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function _toggleStmtAccountButtons(isSplit){
+  [
+    'btn-copy-income-acct',
+    'btn-download-income-acct',
+    'btn-copy-balance-acct',
+    'btn-download-balance-acct',
+    'btn-copy-pl-acct',
+    'btn-download-pl-acct'
+  ].forEach(id => {
+    const el = document.getElementById(id);
+    if(el) el.style.display = isSplit ? '' : 'none';
+  });
+}
+
+async function downloadReportPdf(kind, reportName='', date_from_override='', date_to_override='', account_override=''){
+  const date_from = date_from_override || (document.getElementById('stmt_date_from') || {value:''}).value || '';
+  const date_to   = date_to_override   || (document.getElementById('stmt_date_to')   || {value:''}).value || '';
+  const account_id = account_override  || (document.getElementById('stmt_account')    || {value:''}).value || '';
+
+  const qs = new URLSearchParams({
+    kind: kind || 'detailed',
+    date_from,
+    date_to,
+    account_id
+  });
+
+  if(reportName){
+    qs.set('report', reportName);
+  }
+
+  try{
+    const res = await fetch('/download-report-pdf?' + qs.toString(), {
+      method: 'GET',
+      credentials: 'same-origin'
+    });
+
+    if(!res.ok){
+      const msg = await res.text();
+      console.error('PDF download failed:', res.status, msg);
+      alert('PDF download failed: ' + msg);
+      return;
+    }
+
+    const blob = await res.blob();
+    if(!blob || blob.size === 0){
+      alert('PDF download failed: empty file returned.');
+      return;
+    }
+
+    const cd = res.headers.get('Content-Disposition') || '';
+    let filename = 'report.pdf';
+    const m = cd.match(/filename=\"?([^"]+)\"?/i);
+    if(m && m[1]) filename = m[1];
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }catch(e){
+    console.error('PDF download exception:', e);
+    alert('PDF download failed: ' + e);
+  }
+}
+
+async function refreshStmts(){
+  const date_from=(document.getElementById('stmt_date_from')||{value:''}).value||null;
+  const date_to  =(document.getElementById('stmt_date_to'  )||{value:''}).value||null;
+  const account_id=(document.getElementById('stmt_account'  )||{value:''}).value||null;
+
+  if (date_from && date_to && date_from > date_to) {
+    alert('From date cannot be greater than To date');
+    return;
+  }
+  try{
+    // Always fetch combined (all accounts) report
+    const rAll=await fetch('/financial-reports',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({date_from,date_to,account_id:null})
+    });
+    const dAll=await rAll.json();
+    if(!rAll.ok||dAll.error){ renderStatements({error:dAll.error||('HTTP '+rAll.status)},null,null); return; }
+    // If a specific account is selected, also fetch per-account report
+    if(account_id){
+      const rAcct=await fetch('/financial-reports',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({date_from,date_to,account_id})
+      });
+      const dAcct=await rAcct.json();
+      if(rAcct.ok&&!dAcct.error){ renderStatements(dAll||{},dAcct||{},account_id); return; }
+    }
+    renderStatements(dAll||{},null,null);
+  }catch(e){
+    renderStatements({error:'Refresh failed: '+e},null,null);
+  }
+}
+
+function clearStmtFilters(){
+  const df=document.getElementById('stmt_date_from'); if(df) df.value='';
+  const dt=document.getElementById('stmt_date_to');   if(dt) dt.value='';
+  const ac=document.getElementById('stmt_account');   if(ac) ac.value='';
+  const yr=document.getElementById('stmt_year');      if(yr) yr.value='';
+  refreshStmts();
+}
+
+async function showStmtTab(){
+  await loadAccountDropdowns();
+  await populateYearDropdown();
+  await refreshStmts();
+}
+
+// ── Manual classify (paste) removed because the quick classify UI is disabled.
+function classifyPasted(){
+  setStatus('Quick classify has been removed. Use file upload and review instead.','info');
+}
+
+function renderLedgerTable(rows){
+  const el=document.getElementById('ledger-table');
+  if(!el)return;
+  if(!rows||!rows.length){
+    el.innerHTML='<p style="color:#bbb;font-size:13px">No ledger entries match this filter.</p>';
+    return;
+  }
+  let html='<table><thead><tr><th>Date</th><th>Narration</th><th>Counterparty</th><th>Book</th><th>Section</th><th>Group</th><th>Account</th><th style="text-align:right">Amount</th><th>Type</th><th>Conf</th><th>Source</th></tr></thead><tbody>';
+  rows.forEach(r=>{
+    const amt='₹'+parseFloat(r.amount||0).toLocaleString('en-IN',{minimumFractionDigits:2});
+    const bookLbl=BOOK_LABEL[r.book]||r.book||'—';
+    const cp=r.counterparty||'—';
+    html+=`<tr>
+      <td style="white-space:nowrap">${r.txn_date||''}</td>
+      <td style="max-width:320px;word-break:break-word">${r.narration||r.description||''}</td>
+      <td style="max-width:160px;word-break:break-word">${cp}</td>
+      <td><span class="book-tag ${BOOK_CLASS[r.book]||'book-sus'}">${bookLbl}</span></td>
+      <td>${r.section||'—'}</td>
+      <td>${r.grp||r.group||'—'}</td>
+      <td>${r.account||'—'}</td>
+      <td style="text-align:right;font-weight:800">${amt}</td>
+      <td><span class="badge ${r.txn_type==='credit'?'b-cr':'b-dr'}">${r.txn_type||''}</span></td>
+      <td style="font-size:11px;color:#777">${Math.round((r.confidence||0)*100)}%</td>
+      <td style="font-size:11px;color:#777">${r.source||''}</td>
+    </tr>`;
+  });
+  html+='</tbody></table>';
+  el.innerHTML=html;
+}
+
+// ── Ledger ────────────────────────────────────────────────────────────────────
+async function loadStats(){
+  const host = document.getElementById('stat-cards');
+  if(!host) return;
+  try{
+    const r = await fetch('/stats');
+    const d = await r.json();
+    const items=[{k:'income',l:'Total Income',c:'#1b5e20'},{k:'expenditure',l:'Total Expenditure',c:'#b71c1c'},{k:'assets',l:'Total Assets',c:'#0d47a1'},{k:'net_surplus',l:'Net Surplus',c:'#e65100'},{k:'txns',l:'Transactions',c:'#444'}];
+    host.innerHTML=items.map(({k,l,c})=>{const v=d[k]||0;const disp=k==='txns'?v:`₹${parseFloat(v).toLocaleString('en-IN',{minimumFractionDigits:0})}`;return `<div class="stat-card"><div class="val" style="color:${c}">${disp}</div><div class="lbl">${l}</div></div>`;}).join('');
+  }catch(e){
+    host.innerHTML = `<div style="color:#b71c1c;font-size:13px">Stats failed to load</div>`;
+  }
+}
+
+async function loadLedger(all=false){
+  const bookEl = document.getElementById('f_book');
+  const typeEl = document.getElementById('f_type');
+  const searchEl = document.getElementById('f_search');
+  const cntEl = document.getElementById('ledger-cnt');
+  if(!bookEl || !typeEl || !searchEl) return;
+  const book=bookEl.value;
+  const type=typeEl.value;
+  const search=searchEl.value.trim();
+  const counterparty=(document.getElementById('f_counterparty')||{value:''}).value.trim();
+  const account_id=(document.getElementById('f_account')||{value:''}).value.trim();
+  try{
+    const r=await fetch('/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({book:book||null,txn_type:type||null,search:search||null,counterparty:counterparty||null,account_id:account_id||null,limit:all?2000:500})});
+    const rows=await r.json();
+    if(cntEl) cntEl.textContent=`(${Array.isArray(rows)?rows.length:0})`;
+    renderLedgerTable((Array.isArray(rows)?rows:[]).map(r=>({...r,narration:r.narration||r.description||''})));
+  }catch(e){
+    if(cntEl) cntEl.textContent='(0)';
+    renderLedgerTable([]);
+  }
+}
+
+
+// ── Account dropdowns + manage data ──────────────────────────────────────────
+async function loadAccountDropdowns(){
+  try{
+    const r=await fetch('/accounts');
+    if(!r.ok) return;
+    const accounts=await r.json();
+    // Populate stmt_account dropdown
+    const sd=document.getElementById('stmt_account');
+    if(sd){
+      const cur=sd.value;
+      sd.innerHTML='<option value="">All Accounts</option>'+
+        accounts.map(a=>`<option value="${a.account_id}">${a.account_id} (${a.txn_count} txns)</option>`).join('');
+      if(cur) sd.value=cur;
+    }
+    // Populate ledger f_account dropdown
+    const ld=document.getElementById('f_account');
+    if(ld){
+      const cur2=ld.value;
+      ld.innerHTML='<option value="">All Accounts</option>'+
+        accounts.map(a=>`<option value="${a.account_id}">${a.account_id}</option>`).join('');
+      if(cur2) ld.value=cur2;
+    }
+    // Populate manage data list
+    const ml=document.getElementById('manage-accounts-list');
+    if(ml){
+      if(!accounts.length){
+        ml.innerHTML='<p style="font-size:13px;color:#aaa">No accounts yet.</p>';
+      } else {
+        ml.innerHTML=accounts.map(a=>`
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #f5f5f5">
+            <div>
+              <span style="font-weight:700;font-size:13px">${a.account_id}</span>
+              <span style="font-size:11px;color:#888;margin-left:10px">${a.txn_count} txns · ${a.date_from||''} to ${a.date_to||''}</span>
+            </div>
+            <button class="btn bo" style="font-size:11px;padding:4px 12px;color:#b71c1c;border-color:#b71c1c"
+              onclick="deleteAccountData('${a.account_id}')">🗑 Delete</button>
+          </div>`).join('');
+      }
+    }
+  }catch(e){}
+}
+
+async function deleteAccountData(account_id){
+  if(!_activeUserId){ setStatus('Log in to manage data.','err'); return; }
+  if(!confirm(`Delete ALL data for account '${account_id}'?\nThis cannot be undone.`)) return;
+  try{
+    const r=await fetch('/delete-account-data',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({account_id})});
+    const d=await r.json();
+    const msg=document.getElementById('manage-msg');
+    if(msg) msg.innerHTML=`<span style="color:${d.error?'#b71c1c':'#1b5e20'}">${d.msg||d.error}</span>`;
+    await loadAccountDropdowns();
+    _lastReports={};
+  }catch(e){alert('Delete failed: '+e);}
+}
+
+async function deleteAllData(){
+  if(!_activeUserId){ setStatus('Log in to manage data.','err'); return; }
+  if(!confirm('Delete ALL transaction data for this user?\nYour login account is preserved. This cannot be undone.')) return;
+  try{
+    const r=await fetch('/delete-all-data',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    const d=await r.json();
+    const msg=document.getElementById('manage-msg');
+    if(msg) msg.innerHTML=`<span style="color:${d.error?'#b71c1c':'#1b5e20'}">${d.msg||d.error}</span>`;
+    await loadAccountDropdowns();
+    _lastReports={};
+    document.getElementById('stmt-income') && (document.getElementById('stmt-income').style.display='none');
+    document.getElementById('stmt-balance') && (document.getElementById('stmt-balance').style.display='none');
+    document.getElementById('stmt-pl') && (document.getElementById('stmt-pl').style.display='none');
+    document.getElementById('stmt-empty').style.display='block';
+  }catch(e){alert('Delete failed: '+e);}
+}
+
+async function deleteUserCompletely(){
+  if(!_activeUserId){ setStatus('Log in to manage data.','err'); return; }
+  const infoEl = document.getElementById('active-user-info');
+  const txt = (infoEl && infoEl.textContent) || '';
+  const userName = txt.split(' · ')[0].trim();
+  if(!userName){ alert('No active user found.'); return; }
+
+  if(!confirm(`Delete USER '${userName}' completely?\nThis deletes login, accounts, statements, imports, and review data.\nThis cannot be undone.`)) return;
+
+  const typed = prompt(`Type the exact user name to confirm deletion:\n${userName}`);
+  if(typed !== userName){
+    alert('Typed confirmation did not match. Delete cancelled.');
+    return;
+  }
+
+  try{
+    const r = await fetch('/delete-user',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({confirm_name:userName})
+    });
+    const d = await r.json();
+    if(d.error){ alert(d.error); return; }
+    alert(d.msg || 'User deleted.');
+    logoutUser();
+    location.reload();
+  }catch(e){
+    alert('Delete failed: ' + e);
+  }
+}
+
+// ── Full Report ───────────────────────────────────────────────────────────────
+async function genReport(){document.getElementById('ledger-out').textContent='Generating…';const r=await fetch('/report');document.getElementById('ledger-out').textContent=await r.text();}
+async function checkSys(){const r=await fetch('/check');document.getElementById('sys-out').textContent=await r.text();}
+
+// ── Ledger Dictionary ─────────────────────────────────────────────────────────
+let _dictData = [];
+async function loadDictionary(){
+  const out = document.getElementById('dict-out');
+  const body = document.getElementById('dict-body');
+  if(!out || !body) return;
+
+  if(_dictData.length){
+    out.style.display='block';
+    renderDict(_dictData);
+    return;
+  }
+
+  body.innerHTML='<p style="color:#aaa;font-size:13px">Loading…</p>';
+  out.style.display='block';
+  try{
+    const r=await fetch('/ledger-dictionary');
+    const d=await r.json();
+    if(d.error){
+      body.innerHTML=`<p style="color:var(--red)">${d.error}</p>`;
+      return;
+    }
+    _dictData=d.dictionary||[];
+    renderDict(_dictData);
+  }catch(e){
+    body.innerHTML=`<p style="color:var(--red)">Failed: ${e}</p>`;
+  }
+}
+function filterDict(){
+  const el=document.getElementById('dict-search');
+  renderDict(_filterDictGroups((el&&el.value)||''));
+}
+
+function _renderDictInto(bodyId, groups){
+  const body=document.getElementById(bodyId);
+  if(!body) return;
+  body.style.display='block';
+  body.style.visibility='visible';
+  body.style.minHeight='120px';
+  const BOOK_COLOR={'BALANCE_SHEET':'#1b5e20','INCOME_EXPENSE':'#1565c0','SUSPENSE':'#880e4f','CAPITAL':'#e65100'};
+  if(!groups || !groups.length){
+    body.innerHTML = '<p style="color:#aaa;font-size:13px">No matching entries.</p>';
+    return;
+  }
+
+  let html='';
+  groups.forEach(g=>{
+    const bc=BOOK_COLOR[g.book]||'#555';
+    html+=`<div style="margin-bottom:14px;border-radius:10px;overflow:hidden;border:1px solid #e8e8e8">
+      <div style="background:${bc};color:#fff;padding:9px 14px;font-size:12px;font-weight:800;letter-spacing:.4px">
+        ${String(g.book||'').replace('_',' ')} › ${g.section} › ${g.group}
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:11.5px">
+        <thead><tr style="background:#f5f7fa">
+          <th style="padding:7px 10px;text-align:left;border-bottom:1px solid #e8e8e8;width:28%">Key</th>
+          <th style="padding:7px 10px;text-align:left;border-bottom:1px solid #e8e8e8;width:24%">Account Name</th>
+          <th style="padding:7px 10px;text-align:left;border-bottom:1px solid #e8e8e8">Description</th>
+        </tr></thead><tbody>`;
+    (g.entries||[]).forEach(e=>{
+      html+=`<tr style="border-bottom:1px solid #f3f3f3">
+        <td style="padding:7px 10px;font-family:monospace;color:${bc};font-size:11px;font-weight:700">${e.key}</td>
+        <td style="padding:7px 10px;font-weight:600;color:#333">${e.account||'—'}</td>
+        <td style="padding:7px 10px;color:#666">${e.description||'—'}</td>
+      </tr>`;
+    });
+    html+=`</tbody></table></div>`;
+  });
+  body.innerHTML = html;
+}
+
+function renderDict(groups){ _renderDictInto('dict-body', groups); }
+function _filterDictGroups(q){
+  q=(q||'').toLowerCase();
+  if(!q) return _dictData;
+  return _dictData.map(g=>({...g,entries:(g.entries||[]).filter(e=>
+    (e.key||'').toLowerCase().includes(q)||
+    (e.account||'').toLowerCase().includes(q)||
+    (e.description||'').toLowerCase().includes(q)||
+    (e.attribution||'').toLowerCase().includes(q)
+  )})).filter(g=>g.entries.length>0);
+}
+
+// ── Profile Questionnaire ────────────────────────────────────────────────────
+function _escHtml(v){
+  return String(v ?? '')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+}
+function _profileMsg(msg='', color='#666'){
+  const el=document.getElementById('pf_msg');
+  if(el){ el.textContent=msg; el.style.color=color; }
+}
+function _profileNoteParts(raw){
+  const txt=String(raw||'');
+  const m=txt.match(/^\[default_treatment=([^\]]*)\]\s*(.*)$/);
+  return { default_treatment: m ? m[1] : '', notes: m ? (m[2]||'') : txt };
+}
+function _profileJoinNotes(defaultTreatment, notes){
+  const dt=String(defaultTreatment||'').trim();
+  const tail=String(notes||'').trim();
+  return dt ? `[default_treatment=${dt}]${tail ? ' ' + tail : ''}` : tail;
+}
+function _counterpartyRowHtml(kind, row={}){
+  const meta=_profileNoteParts(row.notes||'');
+  return `<tr data-kind="${_escHtml(kind)}">
+    <td><input data-f="display_name" value="${_escHtml(row.display_name||'')}" placeholder="Sarju Garg HUF"></td>
+    <td><input data-f="relationship" value="${_escHtml(row.relationship||'')}" placeholder="${kind==='family'?'Mother / Brother':'Client / Broker'}"></td>
+    <td><input data-f="default_treatment" value="${_escHtml(meta.default_treatment||'')}" placeholder="family loan / salary / trading"></td>
+    <td><input data-f="default_ledger_key" value="${_escHtml(row.default_ledger_key||'')}" placeholder="liability_loan_outstanding"></td>
+    <td><input data-f="txn_direction_hint" value="${_escHtml(row.txn_direction_hint||'')}" placeholder="credit / debit / both"></td>
+    <td><input data-f="notes" value="${_escHtml(meta.notes||'')}" placeholder="Optional notes"></td>
+    <td><button class="btn bo" style="font-size:11px;padding:4px 10px" onclick="this.closest('tr').remove();toggleProfileSections()">✕</button></td>
+  </tr>`;
+}
+function _knownAccountRowHtml(row={}){
+  return `<tr>
+    <td><input data-f="account_label" value="${_escHtml(row.account_label||'')}" placeholder="HDFC Salary"></td>
+    <td><input data-f="institution_name" value="${_escHtml(row.institution_name||'')}" placeholder="HDFC Bank"></td>
+    <td><input data-f="account_mask" value="${_escHtml(row.account_mask||'')}" placeholder="XX1234"></td>
+    <td><input data-f="account_type" value="${_escHtml(row.account_type||'')}" placeholder="Savings"></td>
+    <td><input data-f="ownership_type" value="${_escHtml(row.ownership_type||'')}" placeholder="Self / Joint"></td>
+    <td><button class="btn bo" style="font-size:11px;padding:4px 10px" onclick="this.closest('tr').remove();toggleProfileSections()">✕</button></td>
+  </tr>`;
+}
+function addProfileCounterpartyRow(kind, row={}){
+  const body=document.getElementById(`pf_${kind}_rows`);
+  if(body) body.insertAdjacentHTML('beforeend', _counterpartyRowHtml(kind, row));
+  toggleProfileSections();
+}
+function addKnownAccountRow(row={}){
+  const body=document.getElementById('pf_account_rows');
+  if(body) body.insertAdjacentHTML('beforeend', _knownAccountRowHtml(row));
+  toggleProfileSections();
+}
+function _collectProfileRows(bodyId, mapper){
+  const body=document.getElementById(bodyId);
+  if(!body) return [];
+  return Array.from(body.querySelectorAll('tr')).map(mapper).filter(Boolean);
+}
+function _resetProfileQuestionnaire(){
+  ['pf_entity_type','pf_legal_name','pf_huf_name','pf_dob','pf_employer_name'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.value='';
+  });
+  ['pf_family_toggle','pf_salaried_toggle','pf_consultancy_toggle','pf_trading_toggle','pf_multi_bank_toggle','pf_credit_cards','pf_rental_income'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.checked=false;
+  });
+  ['pf_family_rows','pf_consultancy_rows','pf_broker_rows','pf_account_rows'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.innerHTML='';
+  });
+  _profileMsg('');
+  toggleProfileSections();
+}
+function toggleProfileSections(){
+  const entity=(document.getElementById('pf_entity_type')||{value:''}).value;
+  const hufName=(document.getElementById('pf_huf_name')||{value:''}).value.trim();
+  const familyOn=(document.getElementById('pf_family_toggle')||{checked:false}).checked || !!document.querySelector('#pf_family_rows tr');
+  const salariedOn=(document.getElementById('pf_salaried_toggle')||{checked:false}).checked;
+  const consultancyOn=(document.getElementById('pf_consultancy_toggle')||{checked:false}).checked || !!document.querySelector('#pf_consultancy_rows tr');
+  const tradingOn=(document.getElementById('pf_trading_toggle')||{checked:false}).checked || !!document.querySelector('#pf_broker_rows tr');
+  const multiBankOn=(document.getElementById('pf_multi_bank_toggle')||{checked:false}).checked || !!document.querySelector('#pf_account_rows tr');
+  const hufWrap=document.getElementById('pf_huf_name_wrap');
+  const employerWrap=document.getElementById('pf_employer_wrap');
+  const familySec=document.getElementById('pf_family_section');
+  const consultancySec=document.getElementById('pf_consultancy_section');
+  const brokerSec=document.getElementById('pf_broker_section');
+  const accountsSec=document.getElementById('pf_accounts_section');
+  if(hufWrap) hufWrap.style.display=(entity==='HUF' || !!hufName)?'block':'none';
+  if(employerWrap) employerWrap.style.display=salariedOn?'block':'none';
+  if(familySec) familySec.style.display=familyOn?'block':'none';
+  if(consultancySec) consultancySec.style.display=consultancyOn?'block':'none';
+  if(brokerSec) brokerSec.style.display=tradingOn?'block':'none';
+  if(accountsSec) accountsSec.style.display=multiBankOn?'block':'none';
+  if(!_activeUserId || _profileGateState.profile_required){
+    [familySec, consultancySec, brokerSec, accountsSec].forEach(el=>{ if(el) el.style.display='none'; });
+  }
+}
+
+function _validateProfilePayload(payload){
+  const entityType=String(payload.entity_type||'').trim().toUpperCase();
+  if(!entityType) return 'Entity type is required';
+  if(!['INDIVIDUAL','NRI','HUF'].includes(entityType)) return 'Entity type must be one of INDIVIDUAL, NRI, HUF';
+  if(!String(payload.legal_name||'').trim()) return 'Legal name is required';
+  if(entityType==='HUF' && !String(payload.huf_name||'').trim()) return 'HUF name is required when Entity Type is HUF';
+  if(payload.is_salaried && !String(payload.employer_name||'').trim()) return 'Employer name is required when Salaried is selected';
+  return '';
+}
+
+async function loadProfileQuestionnaire(){
+  if(!_activeUserId){
+    _resetProfileQuestionnaire();
+    _setProfileInputsEnabled(false);
+    _setProfileBanner('Create account first to save your classification profile', 'info');
+    return;
+  }
+  _profileMsg('Loading profile…');
+  try{
+    const [rp, rc, ra] = await Promise.all([
+      fetch('/profile'),
+      fetch('/known-counterparties?all=1'),
+      fetch('/known-accounts?all=1')
+    ]);
+    const profile = rp.ok ? await rp.json() : {};
+    const cpData = rc.ok ? await rc.json() : {rows:[]};
+    const acctData = ra.ok ? await ra.json() : {rows:[]};
+
+    _resetProfileQuestionnaire();
+
+    const entityType = String(profile.entity_type||'').toUpperCase();
+    const entityEl = document.getElementById('pf_entity_type');
+    if(entityEl) entityEl.value = entityType || (Number(profile.is_nri||0) ? 'NRI' : '');
+    const legalNameEl = document.getElementById('pf_legal_name'); if(legalNameEl) legalNameEl.value = profile.legal_name || '';
+    const hufNameEl = document.getElementById('pf_huf_name'); if(hufNameEl) hufNameEl.value = profile.huf_name || '';
+    const dobEl = document.getElementById('pf_dob'); if(dobEl) dobEl.value = profile.dob || '';
+    const employerEl = document.getElementById('pf_employer_name'); if(employerEl) employerEl.value = profile.employer_name || '';
+
+    ['pf_family_toggle','pf_salaried_toggle','pf_consultancy_toggle','pf_trading_toggle','pf_multi_bank_toggle','pf_credit_cards','pf_rental_income'].forEach((id)=>{
+      const map = {
+        pf_family_toggle: 'has_family_transactions',
+        pf_salaried_toggle: 'is_salaried',
+        pf_consultancy_toggle: 'has_consultancy',
+        pf_trading_toggle: 'has_trading',
+        pf_multi_bank_toggle: 'has_multiple_bank_accounts',
+        pf_credit_cards: 'has_credit_cards',
+        pf_rental_income: 'has_rental_income'
+      };
+      const el=document.getElementById(id);
+      if(el) el.checked = Number(profile[map[id]] || 0) === 1;
+    });
+
+    const rows = Array.isArray(cpData.rows) ? cpData.rows : [];
+    rows.filter(r => String(r.party_type||'').toLowerCase()==='family').forEach(r => addProfileCounterpartyRow('family', r));
+    rows.filter(r => String(r.party_type||'').toLowerCase()==='consultancy').forEach(r => addProfileCounterpartyRow('consultancy', r));
+    rows.filter(r => String(r.party_type||'').toLowerCase()==='broker').forEach(r => addProfileCounterpartyRow('broker', r));
+    (Array.isArray(acctData.rows) ? acctData.rows : []).forEach(r => addKnownAccountRow(r));
+
+    _profileMsg('Profile loaded.', '#1b5e20');
+    await refreshProfileGate({preserveBanner:true});
+    toggleProfileSections();
+  }catch(e){
+    _profileMsg('Profile load failed: ' + (e.message || e), '#b71c1c');
+  }
+}
+async function saveProfileQuestionnaire(){
+  if(!_activeUserId){
+    _profileMsg('Create account first to save your classification profile', '#b71c1c');
+    return;
+  }
+  const entityType=(document.getElementById('pf_entity_type')||{value:''}).value.trim();
+  const payload = {
+    entity_type: entityType,
+    legal_name: (document.getElementById('pf_legal_name')||{value:''}).value.trim(),
+    huf_name: (document.getElementById('pf_huf_name')||{value:''}).value.trim(),
+    dob: (document.getElementById('pf_dob')||{value:''}).value,
+    is_nri: entityType === 'NRI',
+    has_family_transactions: !!(document.getElementById('pf_family_toggle')||{checked:false}).checked,
+    is_salaried: !!(document.getElementById('pf_salaried_toggle')||{checked:false}).checked,
+    employer_name: (document.getElementById('pf_employer_name')||{value:''}).value.trim(),
+    has_consultancy: !!(document.getElementById('pf_consultancy_toggle')||{checked:false}).checked,
+    has_trading: !!(document.getElementById('pf_trading_toggle')||{checked:false}).checked,
+    has_multiple_bank_accounts: !!(document.getElementById('pf_multi_bank_toggle')||{checked:false}).checked,
+    has_credit_cards: !!(document.getElementById('pf_credit_cards')||{checked:false}).checked,
+    has_rental_income: !!(document.getElementById('pf_rental_income')||{checked:false}).checked,
+  };
+  const validationError=_validateProfilePayload(payload);
+  if(validationError){
+    _profileMsg(validationError, '#b71c1c');
+    return;
+  }
+
+  const familyRows = _collectProfileRows('pf_family_rows', tr => {
+    const get = f => (tr.querySelector(`[data-f="${f}"]`)||{value:''}).value.trim();
+    const display_name = get('display_name');
+    if(!display_name) return null;
+    return {
+      display_name,
+      relationship: get('relationship'),
+      party_type: 'family',
+      default_ledger_key: get('default_ledger_key'),
+      txn_direction_hint: get('txn_direction_hint'),
+      notes: _profileJoinNotes(get('default_treatment'), get('notes')),
+      is_active: 1
+    };
+  });
+  const consultancyRows = _collectProfileRows('pf_consultancy_rows', tr => {
+    const get = f => (tr.querySelector(`[data-f="${f}"]`)||{value:''}).value.trim();
+    const display_name = get('display_name');
+    if(!display_name) return null;
+    return {
+      display_name,
+      relationship: get('relationship'),
+      party_type: 'consultancy',
+      default_ledger_key: get('default_ledger_key'),
+      txn_direction_hint: get('txn_direction_hint'),
+      notes: _profileJoinNotes(get('default_treatment'), get('notes')),
+      is_active: 1
+    };
+  });
+  const brokerRows = _collectProfileRows('pf_broker_rows', tr => {
+    const get = f => (tr.querySelector(`[data-f="${f}"]`)||{value:''}).value.trim();
+    const display_name = get('display_name');
+    if(!display_name) return null;
+    return {
+      display_name,
+      relationship: get('relationship') || 'broker',
+      party_type: 'broker',
+      default_ledger_key: get('default_ledger_key'),
+      txn_direction_hint: get('txn_direction_hint'),
+      notes: _profileJoinNotes(get('default_treatment'), get('notes')),
+      is_active: 1
+    };
+  });
+  const accountRows = _collectProfileRows('pf_account_rows', tr => {
+    const get = f => (tr.querySelector(`[data-f="${f}"]`)||{value:''}).value.trim();
+    const row = {
+      account_label: get('account_label'),
+      institution_name: get('institution_name'),
+      account_mask: get('account_mask'),
+      account_type: get('account_type'),
+      ownership_type: get('ownership_type'),
+      is_active: 1
+    };
+    return (row.account_label || row.institution_name || row.account_mask) ? row : null;
+  });
+
+  _profileMsg('Saving profile…');
+  try{
+    const [rp, rc, ra] = await Promise.all([
+      fetch('/save-profile', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}),
+      fetch('/save-known-counterparties', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({rows:[...familyRows,...consultancyRows,...brokerRows]})}),
+      fetch('/save-known-accounts', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({rows:accountRows})}),
+    ]);
+    const profileRes = await rp.json();
+    const cpRes = await rc.json();
+    const acctRes = await ra.json();
+    if(!rp.ok || profileRes.error || !rc.ok || cpRes.error || !ra.ok || acctRes.error){
+      throw new Error(profileRes.error || cpRes.error || acctRes.error || 'Profile save failed');
+    }
+    let applyMsg='';
+    try{
+      const ar=await fetch('/apply-profile-to-pending', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+      const ad=ar.ok ? await ar.json() : {};
+      if(ad && Number(ad.updated||0)>0) applyMsg=` Applied profile to ${ad.updated} pending transaction${Number(ad.updated)===1?'':'s'}.`;
+    }catch(_e){}
+    _profileMsg('Profile saved.' + applyMsg, '#1b5e20');
+    await refreshProfileGate();
+    toggleProfileSections();
+    if(typeof loadReview === 'function') loadReview();
+  }catch(e){
+    _profileMsg('Profile save failed: ' + (e.message || e), '#b71c1c');
+  }
+}
+async function applyProfileToApprovedSafe(){
+  if(!_activeUserId){
+    _profileMsg('Create account first to save your classification profile', '#b71c1c');
+    return;
+  }
+  if(!confirm('Apply profile hints to already approved transactions where it is safe to do so?')) return;
+  _profileMsg('Applying profile to approved transactions…');
+  try{
+    const r=await fetch('/apply-profile-to-approved-safe', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    const d=await r.json();
+    if(!r.ok || d.error) throw new Error(d.error || 'Apply failed');
+    _profileMsg(d.msg || `Reviewed ${d.reviewed||0}; updated ${d.updated||0}.`, '#1b5e20');
+    _lastReports={};
+  }catch(e){
+    _profileMsg('Apply failed: ' + (e.message || e), '#b71c1c');
+  }
+}
+_resetProfileQuestionnaire();
+_applySetupInteractionState();
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+function authTab(t){
+  const loginPanel = document.getElementById('panel-login');
+  const createPanel = document.getElementById('panel-create');
+
+  if(loginPanel){
+    loginPanel.style.display = t === 'login' ? 'block' : 'none';
+  }
+
+  if(createPanel){
+    createPanel.style.display = t === 'create' ? 'block' : 'none';
+    createPanel.hidden = false;
+  }
+
+  ['login','create'].forEach(x=>{
+    const tab = document.getElementById('tab-' + x);
+    if(tab){
+      tab.style.color = t === x ? 'var(--blue)' : '#aaa';
+      tab.style.borderBottom = t === x ? '2px solid var(--blue)' : 'none';
+    }
+  });
+}
+function _setActiveUser(d, opts={}){
+  _activeUserId=d.id || '';
+  const banner = document.getElementById('active-user-banner');
+  const info   = document.getElementById('active-user-info');
+  const hdr    = document.getElementById('hdr-sub');
+
+  if(banner) banner.style.display='flex';
+
+  const ut = d.user_type ? ` · ${d.user_type}` : '';
+  if(info){
+    info.textContent = `${d.name}${d.phone ? ' · ' + d.phone : ''}${d.email ? ' · ' + d.email : ''}${ut} · ${d.txn_count || 0} transactions`;
+  }
+
+  // Keep setup visible after login
+  const loginPanel  = document.getElementById('panel-login');
+  const createPanel = document.getElementById('panel-create');
+  const tabWrap     = document.getElementById('tab-login')?.parentElement;
+
+  if(loginPanel)  loginPanel.style.display = 'none';
+  if(createPanel) createPanel.style.display = 'none';
+  if(tabWrap)     tabWrap.style.display = 'none';
+
+  const authCard = document.getElementById('user-auth-card');
+  if(authCard) authCard.style.display = 'block';
+
+  if(hdr){
+    hdr.textContent = 'Active: ' + d.name + (d.user_type ? ' (' + d.user_type + ')' : '');
+  }
+
+  setStatus(`✅ ${d.msg}`,'ok');
+  _applySetupInteractionState();
+  refreshUploadedFiles();
+  if(!opts.skipProfileLoad){
+    loadProfileQuestionnaire()
+      .then(()=>refreshProfileGate({focusProfile: !!d.profile_required, message: d.msg, preserveBanner: false}))
+      .catch(()=>refreshProfileGate({focusProfile: !!d.profile_required, message: d.msg}));
+  }
+}
+function _validEmail(v){
+  return !v || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+}
+function _cleanPhone(v){
+  return (v || '').replace(/\D+/g,'');
+}
+function _validPhone(v){
+  return !v || (/^\d{8,15}$/.test(v));
+}
+
+async function loginUser(){
+  const name=(document.getElementById('l_name')?.value || '').trim();
+  const phone=_cleanPhone((document.getElementById('l_phone')?.value || '').trim());
+  const email=((document.getElementById('l_email')?.value || '').trim().toLowerCase());
+  const password=(document.getElementById('l_password')?.value || '');
+
+  const msgEl = document.getElementById('login-msg');
+  if(msgEl) msgEl.textContent='';
+
+  if(!name && !phone && !email){
+    if(msgEl) msgEl.innerHTML='<span style="color:var(--red)">Enter at least one field</span>';
+    return;
+  }
+  if(phone && !_validPhone(phone)){
+    if(msgEl) msgEl.innerHTML='<span style="color:var(--red)">Phone must be 8 to 15 digits</span>';
+    return;
+  }
+  if(email && !_validEmail(email)){
+    if(msgEl) msgEl.innerHTML='<span style="color:var(--red)">Enter a valid email</span>';
+    return;
+  }
+  if(!password){
+    if(msgEl) msgEl.innerHTML='<span style="color:var(--red)">Enter password</span>';
+    return;
+  }
+
+  if(msgEl) msgEl.textContent='Signing in…';
+
+  try{
+    const r = await fetch('/login',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name,phone,email,password})
+    });
+
+    let d = {};
+    try{ d = await r.json(); } catch(_e){ throw new Error(`Server returned ${r.status}`); }
+
+    if(!r.ok || d.error){
+      if(msgEl) msgEl.innerHTML=`<span style="color:var(--red)">${d.error || 'Login failed'}</span>`;
+      return;
+    }
+
+    _setActiveUser(d);
+    if(msgEl) msgEl.innerHTML='<span style="color:#1b5e20">Logged in successfully</span>';
+    try{ await loadAccountDropdowns(); }catch(_e){}
+  }catch(e){
+    if(msgEl) msgEl.innerHTML=`<span style="color:var(--red)">Login failed: ${e.message || e}</span>`;
+  }
+}
+
+windows.forgotPassword = function(){
+  const msgEl = document.getElementById('login-msg');
+
+  if(msgEl){
+    msgEl.innerHTML =
+      '<span style="color:#b26a00">Password reset feature is not available yet. Please contact admin/support.</span>';
+  }else{
+    alert('Password reset feature is not available yet. Please contact admin/support.');
+  }
+}
+
+function toggleCreatePassword() {
+  const p = document.getElementById("u_password");
+  p.type = p.type === "password" ? "text" : "password";
+}
+
+function toggleConfirmPassword() {
+  const p = document.getElementById("u_password_confirm");
+  p.type = p.type === "password" ? "text" : "password";
+}
+
+
+
+async function createUser(){
+  const name=document.getElementById('u_name').value.trim();
+  const email=document.getElementById('u_email').value.trim().toLowerCase();
+  const phone=_cleanPhone(document.getElementById('u_phone').value.trim());
+  const password=(document.getElementById('u_password').value || '');
+  const confirmPassword=(document.getElementById('u_password_confirm').value || '');
+  const user_type=document.getElementById('u_user_type').value||'INDIVIDUAL';
+
+  if(name.length < 2){
+    document.getElementById('create-msg').innerHTML='<span style="color:var(--red)">Name must be at least 2 characters</span>';
+    return;
+  }
+  if(phone && !_validPhone(phone)){
+    document.getElementById('create-msg').innerHTML='<span style="color:var(--red)">Phone must be 8 to 15 digits</span>';
+    return;
+  }
+  if(email && !_validEmail(email)){
+    document.getElementById('create-msg').innerHTML='<span style="color:var(--red)">Enter a valid email</span>';
+    return;
+  }
+  if(!phone && !email){
+    document.getElementById('create-msg').innerHTML='<span style="color:var(--red)">Provide at least phone or email</span>';
+    return;
+  }
+  if(password.length < 8){
+    document.getElementById('create-msg').innerHTML='<span style="color:var(--red)">Password must be at least 8 characters</span>';
+    return;
+  }
+  if(!/[!@#$%^&*()_\-+=\[{\]};:'",.<>/?\\|`~]/.test(password)){
+    document.getElementById('create-msg').innerHTML='<span style="color:var(--red)">Password must include one special character</span>';
+    return;
+  }
+  if(password !== confirmPassword){
+    document.getElementById('create-msg').innerHTML='<span style="color:var(--red)">Passwords do not match</span>';
+    return;
+  }
+
+  document.getElementById('create-msg').textContent='Creating…';
+
+  try{
+    const r=await fetch('/create-user',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name,email,phone,password,user_type})
+    });
+
+    let d={};
+    try{ d=await r.json(); }catch(_e){ throw new Error(`Server returned ${r.status}`); }
+
+    if(!r.ok || d.error){
+      document.getElementById('create-msg').innerHTML=`<span style="color:var(--red)">${d.error||'Create failed'}</span>`;
+      return;
+    }
+
+    _setActiveUser(d, {skipProfileLoad:true});
+    document.getElementById('create-msg').innerHTML='<span style="color:#1b5e20">Account created. Complete your basic classification profile to continue.</span>';
+    try{ await loadProfileQuestionnaire(); }catch(_e){}
+    const legalNameEl=document.getElementById('pf_legal_name');
+    if(legalNameEl && !legalNameEl.value.trim()) legalNameEl.value=name;
+    _applySetupInteractionState();
+    _focusProfileSetup('Account created. Complete your basic classification profile to continue.');
+    try{ await refreshProfileGate({focusProfile:true, message:'Account created. Complete your basic classification profile to continue.'}); }catch(_e){}
+    try{ await loadAccountDropdowns(); }catch(_e){}
+  }catch(e){
+    document.getElementById('create-msg').innerHTML=`<span style="color:var(--red)">Create failed: ${e.message || e}</span>`;
+  }
+}
+
+async function forgotPassword(){
+  const email=((document.getElementById('fp_email')?.value || '').trim().toLowerCase());
+  const phone=_cleanPhone((document.getElementById('fp_phone')?.value || '').trim());
+  const msgEl=document.getElementById('forgot-msg');
+
+  if(!email && !phone){
+    if(msgEl) msgEl.innerHTML='<span style="color:var(--red)">Enter email or phone</span>';
+    return;
+  }
+
+  try{
+    const r=await fetch('/forgot-password',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({email,phone})
+    });
+    const d=await r.json();
+    if(!r.ok || d.error){
+      if(msgEl) msgEl.innerHTML=`<span style="color:var(--red)">${d.error || 'Request failed'}</span>`;
+      return;
+    }
+    if(msgEl) msgEl.innerHTML=`<span style="color:#1b5e20">Reset token: ${d.reset_token}</span>`;
+  }catch(e){
+    if(msgEl) msgEl.innerHTML=`<span style="color:var(--red)">Request failed: ${e.message || e}</span>`;
+  }
+}
+
+async function resetPassword(){
+  const token=(document.getElementById('rp_token')?.value || '').trim();
+  const new_password=(document.getElementById('rp_password')?.value || '');
+  const msgEl=document.getElementById('reset-msg');
+
+  if(!token){
+    if(msgEl) msgEl.innerHTML='<span style="color:var(--red)">Enter reset token</span>';
+    return;
+  }
+  if(new_password.length < 8){
+    if(msgEl) msgEl.innerHTML='<span style="color:var(--red)">Password must be at least 8 characters</span>';
+    return;
+  }
+  if(!/[!@#$%^&*()_\-+=\[{\]};:'",.<>/?\\|`~]/.test(new_password)){
+    if(msgEl) msgEl.innerHTML='<span style="color:var(--red)">Password must include one special character</span>';
+    return;
+  }
+
+  try{
+    const r=await fetch('/reset-password',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({token,new_password})
+    });
+    const d=await r.json();
+    if(!r.ok || d.error){
+      if(msgEl) msgEl.innerHTML=`<span style="color:var(--red)">${d.error || 'Reset failed'}</span>`;
+      return;
+    }
+    if(msgEl) msgEl.innerHTML='<span style="color:#1b5e20">Password reset successfully</span>';
+  }catch(e){
+    if(msgEl) msgEl.innerHTML=`<span style="color:var(--red)">Reset failed: ${e.message || e}</span>`;
+  }
+}
+
+function logoutUser(){
+  _activeUserId='';
+  _profileGateState={ok:false,profile_required:false,is_complete:false,missing_reason:''};
+  const banner = document.getElementById('active-user-banner');
+  const authCard = document.getElementById('user-auth-card');
+  const hdr = document.getElementById('hdr-sub');
+
+  if(banner) banner.style.display='none';
+  if(authCard) authCard.style.display='block';
+
+  const loginPanel  = document.getElementById('panel-login');
+  const createPanel = document.getElementById('panel-create');
+  const tabWrap     = document.getElementById('tab-login')?.parentElement;
+
+  if(tabWrap) tabWrap.style.display = 'flex';
+  if(loginPanel) loginPanel.style.display = 'block';
+  if(createPanel) createPanel.style.display = 'none';
+
+  if(hdr) hdr.textContent='3-Book Accounting · Balance Sheet · Income & Expenditure · Capital';
+
+  if(document.getElementById('l_name')) document.getElementById('l_name').value='';
+  if(document.getElementById('l_phone')) document.getElementById('l_phone').value='';
+  if(document.getElementById('l_email')) document.getElementById('l_email').value='';
+  if(document.getElementById('l_password')) document.getElementById('l_password').value='';
+  if(document.getElementById('u_name')) document.getElementById('u_name').value='';
+  if(document.getElementById('u_email')) document.getElementById('u_email').value='';
+  if(document.getElementById('u_phone')) document.getElementById('u_phone').value='';
+
+  if(document.getElementById('login-msg')) document.getElementById('login-msg').textContent='';
+  if(document.getElementById('create-msg')) document.getElementById('create-msg').textContent='';
+  if(document.getElementById('manage-msg')) document.getElementById('manage-msg').textContent='';
+  _resetProfileQuestionnaire();
+  _setProfileBanner('Create account first to save your classification profile', 'info');
+  _applySetupInteractionState();
+  _applyProfileGate();
+  refreshUploadedFiles();
+
+  fetch('/logout',{method:'POST'}).catch(()=>{});
+}
+
+// ── Trace Modal ───────────────────────────────────────────────────────────────
+
+async function openTrace(title, params) {
+  window._lastTraceParams = params || {};
+  await _ensureLedgerKeys();
+  document.getElementById('trace-modal-title').textContent = title;
+  document.getElementById('trace-modal-loading').style.display = 'block';
+  document.getElementById('trace-modal-content').style.display = 'none';
+  document.getElementById('trace-modal-empty').style.display = 'none';
+  document.getElementById('trace-modal-summary').innerHTML = '';
+  document.getElementById('trace-modal-overlay').classList.add('open');
+
+  try {
+    const merged = Object.assign({}, params || {});
+    const df = (document.getElementById('stmt_date_from')||{}).value || '';
+    const dt = (document.getElementById('stmt_date_to')||{}).value || '';
+    const acct = (document.getElementById('stmt_account')||{}).value || '';
+    if(df && !merged.date_from) merged.date_from = df;
+    if(dt && !merged.date_to) merged.date_to = dt;
+    if(acct && !merged.account_id) merged.account_id = acct;
+    window._lastTraceParams = merged;
+    document.getElementById('trace-modal-title').textContent = merged.account || title || 'Transaction Trace';
+    const qs = new URLSearchParams(merged).toString();
+    const r = await fetch('/trace?' + qs);
+    const d = await r.json();
+    if (d.error) { alert(d.error); closeTrace(); return; }
+
+    const rows = d.transactions || [];
+    window._lastTraceRows = Array.isArray(rows) ? rows : [];
+    document.getElementById('trace-modal-loading').style.display = 'none';
+
+    // Summary chips
+    const isComputedTrace = !!(
+      d.synthetic === true ||
+      d.editable === false ||
+      (rows || []).some(r => r && (r.synthetic === true || r.editable === false))
+    );
+    const totalCredit = rows.filter(r=>r.txn_type==='credit').reduce((s,r)=>s+r.amount,0);
+    const totalDebit  = rows.filter(r=>r.txn_type==='debit').reduce((s,r)=>s+r.amount,0);
+    const net = d.synthetic ? rows.reduce((s,r)=>s+(r.signed||0),0) : (totalCredit - totalDebit);
+    const fmt = v => '₹'+Math.abs(v).toLocaleString('en-IN',{minimumFractionDigits:2});
+    let chips = `<div class="trace-chip">${rows.length} ${isComputedTrace ? 'computed rows' : 'transactions'}</div>`;
+    if (!isComputedTrace) {
+      chips += `<div class="trace-chip" style="background:#e8f5e9;border-color:#a5d6a7;color:#1b5e20">Credits: ${fmt(totalCredit)}</div>`;
+      chips += `<div class="trace-chip" style="background:#ffebee;border-color:#ef9a9a;color:#b71c1c">Debits: ${fmt(totalDebit)}</div>`;
+    }
+    chips += `<div class="trace-chip" style="background:#f3e5f5;border-color:#ce93d8;color:#6a1b9a">Net: ${fmt(net)} ${net>=0?'(+)':'(-)'}</div>`;
+    if (isComputedTrace) chips += '<div class="trace-chip" style="background:#fff3e0;border-color:#ffb74d;color:#e65100">Computed statement summary — not a transaction list</div>';
+    document.getElementById('trace-modal-summary').innerHTML = chips;
+
+    if (!rows.length) {
+      document.getElementById('trace-modal-empty').style.display = 'block';
+      return;
+    }
+
+    const showSigned = d.synthetic;
+    const headerRow = document.querySelector('#trace-modal-table thead tr');
+    if (headerRow) {
+      headerRow.innerHTML = isComputedTrace
+        ? '<th>Line</th><th>Computed Summary</th><th style="text-align:right">Amount</th>'
+        : '<th>Date</th><th>Counterparty</th><th style="text-align:right">Amount</th><th>Actions</th>';
+    }
+    document.getElementById('trace-modal-rows').innerHTML = rows.map(r => {
+      const amt = parseFloat(r.amount||0);
+      const amtColor = r.txn_type==='credit' ? '#1b5e20' : '#b71c1c';
+      const narrDisplay = (r.narration || r.description || '—').trim() || '—';
+      const rowComputed = isComputedTrace || r.synthetic === true || r.editable === false;
+      if (rowComputed) {
+        const signedVal = parseFloat(r.signed || r.amount || 0);
+        const signedColor = signedVal >= 0 ? '#1b5e20' : '#b71c1c';
+        return `<tr>
+          <td style=\"white-space:nowrap;font-family:monospace;font-size:11px\">${r.id||'computed'}</td>
+          <td style=\"min-width:320px;max-width:520px;word-break:break-word;font-size:11px;color:#555\">
+            <div style="font-weight:700;color:#333;margin-bottom:4px">${narrDisplay}</div>
+            <div style="font-size:11px;color:#777">${r.note || 'Computed statement summary — not a transaction list'}</div>
+          </td>
+          <td style=\"text-align:right;font-weight:700;color:${signedColor};white-space:nowrap\">${fmt(signedVal)}</td>
+        </tr>`;
+      }
+      return `<tr>
+        <td style=\"white-space:nowrap;font-family:monospace;font-size:11px\">${r.txn_date||'—'}</td>
+        <td style=\"min-width:320px;max-width:420px;word-break:break-word;font-size:11px;color:#555\">
+          <div style="margin-bottom:8px">
+            <div style="font-size:12px;color:#555;display:flex;align-items:flex-start;gap:6px;flex-wrap:nowrap">
+              <span style="font-size:10px;background:#eef3ff;border-radius:4px;padding:1px 7px;color:#4a6fa5;font-weight:600;text-transform:uppercase;letter-spacing:.3px;flex:0 0 auto">Narration</span>
+              <span style="font-weight:500;color:#333;word-break:break-word;line-height:1.45">${narrDisplay}</span>
+            </div>
+          </div>
+          <div style="font-size:12px;color:#555;display:flex;align-items:flex-start;gap:6px;flex-wrap:nowrap">
+            <span style="font-size:10px;background:#f0f0f0;border-radius:4px;padding:1px 7px;color:#777;font-weight:600;text-transform:uppercase;letter-spacing:.3px;flex:0 0 auto">Counterparty</span>
+            <span style="font-weight:500;color:#333;word-break:break-word;line-height:1.45">${(r.counterparty||'—')}</span>
+          </div>
+        </td>
+        <td style=\"text-align:right;font-weight:700;color:${amtColor};white-space:nowrap\">${fmt(amt)}</td>
+        <td style=\"min-width:340px;white-space:nowrap\">
+          <div style=\"display:flex;align-items:center;gap:8px;flex-wrap:wrap\">
+            <select id=\"trace-rk-${r.id||''}\" onchange=\"reclassifyApprovedFromTrace('${r.id||''}', this.value)\"
+              style=\"width:210px;padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:11px\">
+              ${_buildKeyOptions(r.ledger_key || '')}
+            </select>
+            <button type=\"button\"
+              onclick=\"saveCustomRuleFromTraceRow('${r.id||''}')\"
+              style=\"padding:5px 9px;border:1px solid #d6d6d6;border-radius:6px;background:#fff;cursor:pointer;font-size:11px\">
+              💾 Save as rule
+            </button>
+          </div>
+        </td>
+      </tr>`;
+    }).join('');
+
+    document.getElementById('trace-modal-content').style.display = 'block';
+  } catch(e) {
+    alert('Trace failed: ' + e);
+    closeTrace();
+  }
+}
+
+async function saveCustomRuleFromTraceRow(id){
+  const rows = Array.isArray(window._lastTraceRows) ? window._lastTraceRows : [];
+  const row = rows.find(x => String(x.id||'') === String(id||''));
+  if(!row){ alert('Row not found'); return; }
+
+  const sel = document.getElementById('trace-rk-' + id);
+  const activeKey =
+    (sel && sel.value ? sel.value : '') ||
+    row.reclassified_key ||
+    row.ledger_key ||
+    row.predicted_ledger_key ||
+    '';
+
+  if(!activeKey){ alert('Pick a category first'); return; }
+
+  const suggested = (row.counterparty || row.narration || '').trim();
+  const pattern = prompt('Enter rule pattern:', suggested);
+  if(pattern === null) return;
+
+  try{
+    const r = await fetch('/add-custom-rule', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        pattern,
+        ledger_key: activeKey,
+        txn_type: row.txn_type || '',
+        match_mode: 'contains',
+        priority: 100
+      })
+    });
+    const d = await r.json();
+    if(d.error){ alert(d.error); return; }
+    alert('Rule saved');
+  }catch(e){
+    alert('Failed: ' + e);
+  }
+}
+
+function _needsStockName(key){
+  const k = String(key || '').toLowerCase().trim();
+  return k.includes('asset_investment_equity')
+      || k.includes('assets_investment_equity')
+      || k.includes('investment_equity');
+}
+
+function _sanitizeStockName(v){
+  return String(v || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9.\-& ]/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+async function reclassifyApprovedFromTrace(txnId, newKey) {
+  if (!txnId || !newKey) return;
+
+  if (_needsStockName(newKey)) {
+    // Remove any stale modal
+    const stale = document.getElementById('_stock-modal-overlay');
+    if (stale) stale.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = '_stock-modal-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.52);z-index:99999;display:flex;align-items:center;justify-content:center';
+    overlay.innerHTML = `
+      <div style="background:#fff;border-radius:14px;padding:28px 32px;width:440px;max-width:96vw;box-shadow:0 8px 40px rgba(0,0,0,.3);font-family:inherit">
+        <h4 style="margin:0 0 18px;font-size:15px;font-weight:800;color:#0d47a1">📊 Equity Share Details</h4>
+        <label style="font-size:11.5px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:4px">Share Symbol <span style="color:#b71c1c">*</span></label>
+        <input id="_sm-stock" placeholder="e.g. INFY, TCS, RELIANCE" autocomplete="off"
+          style="width:100%;padding:9px 12px;border:1.5px solid #bbb;border-radius:7px;font-size:13px;margin-bottom:14px;box-sizing:border-box">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+          <div>
+            <label style="font-size:11.5px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:4px">Transaction Type</label>
+            <select id="_sm-type" style="width:100%;padding:9px 10px;border:1.5px solid #bbb;border-radius:7px;font-size:13px">
+              <option value="BUY">BUY</option>
+              <option value="SELL">SELL</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11.5px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:4px">Price per Share (₹)</label>
+            <input id="_sm-price" placeholder="e.g. 1500.00" type="number" step="0.01" min="0"
+              style="width:100%;padding:9px 12px;border:1.5px solid #bbb;border-radius:7px;font-size:13px;box-sizing:border-box">
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:22px">
+          <div>
+            <label style="font-size:11.5px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:4px">Quantity</label>
+            <input id="_sm-qty" placeholder="e.g. 10" type="number" step="1" min="0"
+              style="width:100%;padding:9px 12px;border:1.5px solid #bbb;border-radius:7px;font-size:13px;box-sizing:border-box">
+          </div>
+          <div>
+            <label style="font-size:11.5px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:4px">TDS (₹, or 0)</label>
+            <input id="_sm-tds" placeholder="e.g. 25.00" type="number" step="0.01" min="0"
+              style="width:100%;padding:9px 12px;border:1.5px solid #bbb;border-radius:7px;font-size:13px;box-sizing:border-box">
+          </div>
+        </div>
+        <div id="_sm-err" style="font-size:12px;color:#b71c1c;min-height:18px;margin-bottom:10px"></div>
+        <div style="display:flex;gap:10px;justify-content:flex-end">
+          <button onclick="document.getElementById('_stock-modal-overlay').remove()"
+            style="padding:9px 20px;border:1.5px solid #ccc;border-radius:7px;font-size:13px;cursor:pointer;background:#fff;font-weight:600">Cancel</button>
+          <button id="_sm-save-btn"
+            onclick="_saveStockReclassify('${txnId}','${newKey}')"
+            style="padding:9px 20px;background:#1565c0;color:#fff;border:none;border-radius:7px;font-size:13px;font-weight:700;cursor:pointer">💾 Save</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    // Focus share symbol input
+    setTimeout(() => { const el = document.getElementById('_sm-stock'); if(el) el.focus(); }, 60);
+    return;
+  }
+
+  // Non-equity key: post directly with no stock fields
+  await _postReclassifyApproved(txnId, newKey, '', '', '', '', '');
+}
+
+async function _saveStockReclassify(txnId, newKey) {
+  const stockName  = _sanitizeStockName((document.getElementById('_sm-stock') || {}).value || '');
+  const tradeType  = ((document.getElementById('_sm-type')  || {}).value || 'BUY').trim().toUpperCase();
+  const tradePrice = ((document.getElementById('_sm-price') || {}).value || '').trim();
+  const tradeQty   = ((document.getElementById('_sm-qty')   || {}).value || '').trim();
+  const tradeTds   = ((document.getElementById('_sm-tds')   || {}).value || '').trim();
+  const errEl      = document.getElementById('_sm-err');
+
+  if (!stockName) {
+    if (errEl) errEl.textContent = 'Share symbol is required (e.g. INFY).';
+    return;
+  }
+  if (errEl) errEl.textContent = '';
+
+  const btn = document.getElementById('_sm-save-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Saving…'; }
+
+  await _postReclassifyApproved(txnId, newKey, stockName, tradeType, tradePrice, tradeQty, tradeTds);
+
+  const ov = document.getElementById('_stock-modal-overlay');
+  if (ov) ov.remove();
+}
+
+async function _postReclassifyApproved(txnId, newKey, stockName, tradeType, tradePrice, tradeQty, tradeTds) {
+  try {
+    const r = await fetch('/reclassify-approved', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        txn_id:      txnId,
+        new_key:     newKey,
+        stock_name:  stockName  || '',
+        trade_type:  tradeType  || '',
+        trade_price: tradePrice || '',
+        trade_qty:   tradeQty   || '',
+        trade_tds:   tradeTds   || '',
+      })
+    });
+    const d = await r.json();
+    if (d.error) { alert('❌ ' + d.error); return; }
+
+    // Refresh statements silently then re-open trace with same params
+    try { await refreshStmts(); } catch(_) {}
+    const title = document.getElementById('trace-modal-title').textContent;
+    const currentParams = window._lastTraceParams || {};
+    openTrace(title, currentParams);
+  } catch (e) {
+    alert('Reclassify failed: ' + e);
+  }
+}
+
+function closeTrace() {
+  document.getElementById('trace-modal-overlay').classList.remove('open');
+}
+
+// Parse TRACE markers embedded in statement text lines
+// Format: [TRACE:book:section:grp:acct]  or  [TRACE:bank_balance]
+function _parseTraceMeta(line) {
+  const m = line.match(/\[TRACE:([^\]]+)\]/);
+  if (!m) return null;
+  const parts = m[1].split(':');
+  if (parts[0] === 'bank_balance') return { type: 'bank_balance' };
+  if (parts.length >= 4) return { type: 'bucket', book: parts[0], section: parts[1], grp: parts[2], account: parts.slice(3).join(':') };
+  if (parts.length >= 3) return { type: 'bucket', book: parts[0], section: parts[1], grp: parts[2] };
+  return null;
+}
+
+async function setOpeningBalance(){
+  if(!_activeUserId){
+    const msg = document.getElementById('ob-msg');
+    if(msg) msg.innerHTML='<span style="color:var(--red)">Log in before saving opening balance.</span>';
+    return;
+  }
+  const rawVal = document.getElementById('ob_amount').value;
+  const amt = parseFloat(rawVal);
+  const msg = document.getElementById('ob-msg');
+  if (!rawVal || isNaN(amt)) {
+    msg.innerHTML='<span style="color:var(--red)">❌ Enter a valid number (can be 0 if no prior balance).</span>';
+    return;
+  }
+  msg.textContent = 'Saving…';
+  try {
+    const r = await fetch('/set-opening-balance', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({amount: amt})
+    });
+    const d = await r.json();
+    if (d.error) { msg.innerHTML=`<span style="color:var(--red)">❌ ${d.error}</span>`; return; }
+    msg.innerHTML=`<span style="color:var(--green)">✅ Opening balance saved: ₹${amt.toLocaleString('en-IN',{minimumFractionDigits:2})}. Regenerate Statements to reflect it.</span>`;
+  } catch(e) {
+    msg.innerHTML=`<span style="color:var(--red)">❌ ${e}</span>`;
+  }
+}
+
+
+
+function tcfSetFile(f){
+  _tcfFile = f;
+  const prev = document.getElementById('tcf-file-preview');
+  if(f){
+    prev.style.display='block';
+    prev.innerHTML = `📄 <strong>${f.name}</strong> &nbsp;(${(f.size/1024).toFixed(1)} KB)`;
+  } else {
+    prev.style.display='none';
+  }
+  _applyProfileGate();
+}
+
+function tcfHandleDrop(e){
+  e.preventDefault();
+  document.getElementById('tcf-drop-zone').classList.remove('dragover');
+  const f = e.dataTransfer.files[0];
+  if(f) tcfSetFile(f);
+}
+
+async function tcfUpload(){
+  if(!_activeUserId){
+    const msg = document.getElementById('tcf-upload-msg');
+    if(msg) msg.innerHTML = '<span style="color:var(--red)">Log in before uploading a trading ledger.</span>';
+    tab('setup');
+    return;
+  }
+  if(_profileGateState.profile_required){
+    const msg = document.getElementById('tcf-upload-msg');
+    if(msg) msg.innerHTML = `<span style="color:var(--red)">${_profileGateText(_profileGateState.missing_reason || '')}</span>`;
+    _focusProfileSetup(_profileGateText(_profileGateState.missing_reason));
+    return;
+  }
+  if(!_tcfFile){ alert('Select a file first.'); return; }
+  const acctId = document.getElementById('tcf-account-id').value.trim() || '5paisa';
+  const msg = document.getElementById('tcf-upload-msg');
+  msg.textContent = '⏳ Uploading & parsing…';
+  const fd = new FormData();
+  fd.append('file', _tcfFile);
+  fd.append('account_id', acctId);
+  try {
+    const r = await fetch('/upload-trading-ledger', {method:'POST', body: fd});
+    const d = await r.json();
+    if(d.profile_required){
+      msg.innerHTML=`<span style="color:var(--red)">❌ ${_profileGateText(d.missing_reason || '')}</span>`;
+      await refreshProfileGate({focusProfile:true, message:_profileGateText(d.missing_reason || '')});
+      return;
+    }
+    if(d.error){ msg.innerHTML=`<span style="color:var(--red)">❌ ${d.error}</span>`; return; }
+    msg.innerHTML = `<span style="color:var(--green)">✅ ${d.rows_inserted} rows stored (${d.rows_skipped||0} skipped). Account: ${d.account_id}</span>`;
+    document.getElementById('tcf-gen-account').value = acctId;
+  } catch(e){ msg.innerHTML=`<span style="color:var(--red)">❌ ${e}</span>`; }
+}
+
+function _tcfChip(label, value, color){
+  const v = typeof value === 'number'
+    ? '₹' + Math.abs(value).toLocaleString('en-IN',{minimumFractionDigits:2})
+    : value;
+  return `<div class="trace-chip" style="background:${color};border-color:#aaa;min-width:120px">
+    <div style="font-size:10px;color:#666;font-weight:600;text-transform:uppercase;letter-spacing:.4px">${label}</div>
+    <div style="font-size:15px;font-weight:800;margin-top:2px">${v}</div>
+  </div>`;
+}
+
+async function loadTradingCashflow(){
+  const date_from = (document.getElementById('tcf-date-from')||{}).value || null;
+  const date_to   = (document.getElementById('tcf-date-to'  )||{}).value || null;
+  const account_id= (document.getElementById('tcf-gen-account')||{}).value.trim() || null;
+
+  document.getElementById('tcf-empty').style.display='none';
+  document.getElementById('tcf-report-card').style.display='none';
+  document.getElementById('tcf-chips').style.display='none';
+
+  try {
+    const r = await fetch('/trading-cashflow', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({date_from, date_to, account_id})
+    });
+    const d = await r.json();
+    if(d.error){
+      document.getElementById('tcf-empty').style.display='block';
+      document.getElementById('tcf-empty').querySelector('div:last-child').textContent = '❌ ' + d.error;
+      return;
+    }
+
+    // Render summary chips
+    const s = d.summary || {};
+    const fmt = v => typeof v==='number' ? '₹'+Math.abs(v).toLocaleString('en-IN',{minimumFractionDigits:2}) : (v||'—');
+    const chips = document.getElementById('tcf-chips');
+    chips.innerHTML = [
+      _tcfChip('Opening Balance', s.opening, '#e3f2fd'),
+      _tcfChip('Net Operating',   s.net_operating,
+               s.net_operating >= 0 ? '#e8f5e9' : '#ffebee'),
+      _tcfChip('Net Financing',   s.net_financing,
+               s.net_financing >= 0 ? '#e8f5e9' : '#ffebee'),
+      _tcfChip('Closing Balance', s.closing_calculated, '#fff3e0'),
+      _tcfChip('Reconciliation',  s.reconciliation_ok ? '✅ Matches' : '⚠️ Difference: ₹'+Math.abs(s.reconciliation_diff||0).toLocaleString('en-IN',{minimumFractionDigits:2}),
+               s.reconciliation_ok ? '#e8f5e9' : '#fff3e0'),
+    ].join('');
+    chips.style.display='flex';
+
+    // Render report text
+    document.getElementById('tcf-report-out').textContent = d.report || '';
+    document.getElementById('tcf-report-card').style.display='block';
+  } catch(e){
+    document.getElementById('tcf-empty').style.display='block';
+    document.getElementById('tcf-empty').querySelector('div:last-child').textContent = '❌ ' + e;
+  }
+}
+
+</script>
+</body>
+</html>"""
+
+
+def _parse_multipart(body: bytes, ct: str) -> Dict[str, Any]:
+    m = re.search(r"boundary=([^\s;]+)", ct)
+    if not m:
+        return {}
+    boundary = ("--" + m.group(1)).encode()
+    parts = body.split(boundary)
+    result: Dict[str, Any] = {}
+    for part in parts:
+        if b"\r\n\r\n" not in part:
+            continue
+        header_raw, _, content = part.partition(b"\r\n\r\n")
+        content = content.rstrip(b"\r\n--")
+        hs = header_raw.decode("utf-8", errors="replace")
+        nm = re.search(r'name="([^"]+)"', hs)
+        if not nm:
+            continue
+        name = nm.group(1)
+        fm = re.search(r'filename="([^"]*)"', hs)
+        if fm:
+            result[name] = {"filename": fm.group(1), "content": content}
+        else:
+            result[name] = content.decode("utf-8", errors="replace").strip()
+    return result
+
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+_PHONE_RE = re.compile(r"^\d{8,15}$")
+_PASSWORD_SPECIAL_RE = re.compile(r"[!@#$%^&*()_\-+=\[{\]};:'\",.<>/?\\|`~]")
+
+def _norm_email(v: str) -> str:
+    return (v or "").strip().lower()
+
+def _norm_phone(v: str) -> str:
+    return re.sub(r"\D+", "", (v or "").strip())
+
+def _hash_password(password: str) -> str:
+    password = str(password or "")
+    salt = os.urandom(16)
+    iterations = 200000
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${salt.hex()}${dk.hex()}"
+
+def _verify_password(password: str, stored: str) -> bool:
+    try:
+        algo, iter_s, salt_hex, hash_hex = str(stored or "").split("$", 3)
+        if algo != "pbkdf2_sha256":
+            return False
+        iterations = int(iter_s)
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(hash_hex)
+        actual = hashlib.pbkdf2_hmac("sha256", str(password or "").encode("utf-8"), salt, iterations)
+        return hmac.compare_digest(actual, expected)
+    except Exception:
+        return False
+
+def _validate_password(password: str) -> Optional[str]:
+    password = str(password or "")
+    if len(password) < 8:
+        return "Password must be at least 8 characters."
+    if password.strip() != password:
+        return "Password should not start or end with spaces."
+    if not _PASSWORD_SPECIAL_RE.search(password):
+        return "Password must include at least one special character."
+    return None
+
+def _validate_auth_fields(name: str, email: str, phone: str, create: bool = False) -> Optional[str]:
+    name = (name or "").strip()
+    email = _norm_email(email)
+    phone = _norm_phone(phone)
+
+    if create and len(name) < 2:
+        return "Name must be at least 2 characters."
+    if email and not _EMAIL_RE.match(email):
+        return "Invalid email format."
+    if phone and not _PHONE_RE.match(phone):
+        return "Phone must contain 10 digits."
+    if create and not email and not phone:
+        return "Provide at least phone or email."
+    if not create and not name and not email and not phone:
+        return "Enter at least one field."
+    return None
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args): pass
+
+    def _text(self, code, body):
+        b = body.encode("utf-8"); self.send_response(code)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", len(b)); self.end_headers(); self.wfile.write(b)
+
+    def _json(self, code, obj):
+        b = json.dumps(obj, ensure_ascii=False).encode("utf-8"); self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", len(b))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.end_headers(); self.wfile.write(b)
+
+    def _html(self, body):
+        import time
+        b = body.encode("utf-8"); self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", len(b))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        self.send_header("ETag", str(time.time()))
+        self.end_headers(); self.wfile.write(b)
+
+    def _body_bytes(self): return self.rfile.read(int(self.headers.get("Content-Length", 0)))
+    def _body(self):
+        raw = self._body_bytes().decode("utf-8", errors="replace")
+        try: return json.loads(raw) if raw else {}
+        except: return {}
+
+    def do_GET(self):
+        global _current_user_id
+        if handle_get_extension(self, self.path, _current_user_id, _wflow, _edb):
+            return
+        if self.path == "/":
+            self._html(HTML)
+        elif self.path == "/check":
+            ml = get_ml(); cl = get_cl()
+            users = _db.get_users()
+            lines = [
+                "SYSTEM STATUS",
+                f"  DB path         : {DB_PATH}",
+                f"  Active user     : {_current_user_id or 'None'}",
+                f"  ML model        : {'✅ Ready' if ml.ready else '❌ Not ready'} ({len(ml.labels)} categories)",
+                f"  KMeans          : {'✅ Ready' if cl.ready else '❌ Not ready'} ({len(cl.cluster_labels)} clusters)",
+                f"  Users in DB     : {len(users)}",
+                "",
+                "ACCOUNTING MODEL:",
+                "  Bank debit = expense ALREADY PAID → Expenditure (not Liability)",
+                "  Liabilities = only true outstanding amounts (loan principal, CC balance)",
+                "  Balance Sheet = Assets / Liabilities / Equity (net worth snapshot)",
+                "  Income & Expenditure = P&L for the period",
+            ]
+            self._text(200, "\n".join(lines))
+
+        elif self.path.startswith("/download-upload/"):
+            # Serve any file the user uploaded (for download)
+            import urllib.parse
+            fname = urllib.parse.unquote(self.path[len("/download-upload/"):])
+            # Sanitize: strip path separators
+            fname = os.path.basename(fname)
+            fpath = os.path.join("/mnt/user-data/uploads", fname)
+            if not os.path.exists(fpath):
+                self._text(404, "File not found"); return
+            import mimetypes
+            mime, _ = mimetypes.guess_type(fpath)
+            mime = mime or "application/octet-stream"
+            with open(fpath, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return 
+        
+        elif self.path == "/report":
+            if not _current_user_id: self._text(400, "No active user."); return
+            self._text(200, generate_ledger_report(_db, _current_user_id))
+        elif self.path == "/stats":
+            if not _current_user_id: self._json(200, {}); return
+            rows = _db.get_ledger_summary(_current_user_id)
+            def _normal_row_balance(r):
+                total = float(r.get("total") or 0)
+                section = r.get("section")
+                txn_type = r.get("txn_type")
+                if section in ("Assets", "Expenditure"):
+                    return total if txn_type == "debit" else -total
+                if section in ("Liabilities", "Equity", "Income"):
+                    return total if txn_type == "credit" else -total
+                return total
+
+            income = sum(
+                _normal_row_balance(r)
+                for r in rows
+                if r["book"] == "INCOME_EXPENSE" and r["section"] == "Income"
+            )
+            expenditure = sum(
+                _normal_row_balance(r)
+                for r in rows
+                if r["book"] == "INCOME_EXPENSE" and r["section"] == "Expenditure"
+            )
+            assets = sum(
+                _normal_row_balance(r)
+                for r in rows
+                if r["book"] == "BALANCE_SHEET" and r["section"] == "Assets"
+            )
+            txns = len(_db.get_txns(_current_user_id, limit=9999))
+            net_surplus = income - expenditure
+            self._json(200, {"income": income, "expenditure": expenditure,
+                             "assets": assets, "net_surplus": net_surplus, "txns": txns})
+        elif self.path == "/ledger-keys":
+            # Return all valid ledger keys with book/section/account for the reclassify dropdown
+            keys = [
+                {"key": k, "book": v[0], "section": v[1], "grp": v[2], "account": v[3]}
+                for k, v in LEDGER_MAP.items()
+            ]
+            self._json(200, keys)
+        # ── PDF SUPPORT (NEW) ── Library availability endpoint
+        elif self.path == "/pdf-support":
+            self._json(200, _pdf_library_status())
+        else:
+            self._text(404, "Not Found")
+
+    def do_POST(self):
+        global _current_user_id
+
+        # ── Auth routes: handled here so _current_user_id is set in this scope ──
+        if self.path == "/create-user":
+            p = self._body()
+            name = (p.get("name") or "").strip()
+            email = _norm_email(p.get("email", ""))
+            phone = _norm_phone(p.get("phone", ""))
+            password = str(p.get("password") or "")
+            user_type = (p.get("user_type") or "INDIVIDUAL").upper()
+
+            err = _validate_auth_fields(name, email, phone, create=True)
+            if err:
+                self._json(400, {"error": err})
+                return
+
+            pw_err = _validate_password(password)
+            if pw_err:
+                self._json(400, {"error": pw_err})
+                return
+
+            if user_type not in ("INDIVIDUAL", "ORGANISATION"):
+                user_type = "INDIVIDUAL"
+
+            if phone:
+                u = _edb.find_user(phone=phone)
+                if u:
+                    self._json(409, {"error": "Phone already exists for another user."})
+                    return
+            if email:
+                u = _edb.find_user(email=email)
+                if u:
+                    self._json(409, {"error": "Email already exists for another user."})
+                    return
+
+            uid = str(uuid.uuid4())
+            pw_hash = _hash_password(password)
+            _edb.create_user(uid, name, email, phone, user_type, pw_hash)
+            _edb.ensure_user_profile_exists(uid)
+
+            if p.get("opening_balance"):
+                _edb.set_opening_balance(uid, float(p.get("opening_balance", 0)))
+
+            _current_user_id = uid
+            self._json(200, {
+                "status":"created",
+                "id":uid,
+                "name":name,
+                "email":email,
+                "phone":phone,
+                "user_type":user_type,
+                "txn_count":0,
+                "profile_required": True,
+                "next_step":"complete_classification_profile",
+                "msg":"Account created. Complete your basic classification profile to continue."
+            })
+            return
+
+        elif self.path == "/login":
+            p = self._body()
+            name = (p.get("name") or "").strip()
+            email = _norm_email(p.get("email", ""))
+            phone = _norm_phone(p.get("phone", ""))
+            password = str(p.get("password") or "")
+
+            err = _validate_auth_fields(name, email, phone, create=False)
+            if err:
+                self._json(400, {"error": err})
+                return
+
+            if not password:
+                self._json(400, {"error": "Password is required."})
+                return
+
+            with _edb._conn() as c:
+                sql = "SELECT * FROM users WHERE 1=1"
+                params = []
+                if phone:
+                    sql += " AND phone=?"
+                    params.append(phone)
+                if email:
+                    sql += " AND LOWER(email)=LOWER(?)"
+                    params.append(email)
+                if name:
+                    sql += " AND LOWER(name)=LOWER(?)"
+                    params.append(name)
+                sql += " ORDER BY created_at DESC"
+                matches = [dict(r) for r in c.execute(sql, tuple(params)).fetchall()]
+
+            if not matches:
+                self._json(404, {"error":"User not found. Check name/phone/email or create account."})
+                return
+            if len(matches) > 1:
+                self._json(409, {"error":"Ambiguous login. Enter phone or email along with name for an exact match."})
+                return
+
+            user = matches[0]
+            stored_hash = user.get("password_hash") or ""
+            if not stored_hash or not _verify_password(password, stored_hash):
+                self._json(401, {"error":"Incorrect password."})
+                return
+
+            _current_user_id = user["id"]
+            cnt = len(_edb.get_txns(user["id"], limit=9999))
+            user_type = user.get("user_type") or "INDIVIDUAL"
+            self._json(200, {
+                "status":"logged_in",
+                "id":user["id"],
+                "name":user["name"],
+                "email":user.get("email",""),
+                "phone":user.get("phone",""),
+                "user_type":user_type,
+                "txn_count":cnt,
+                "msg":f"Welcome back, {user['name']}! {cnt} transactions on record."
+            })
+            return
+ 
+        elif self.path == "/forgot-password":
+            p = self._body()
+            email = _norm_email(p.get("email", ""))
+            phone = _norm_phone(p.get("phone", ""))
+
+            if not email and not phone:
+                self._json(400, {"error": "Provide email or phone."})
+                return
+
+            user = _edb.find_user_for_reset(email=email, phone=phone)
+            if not user:
+                self._json(404, {"error": "No user found for the provided email or phone."})
+                return
+
+            token = secrets.token_urlsafe(24)
+            expires_at = (datetime.utcnow() + timedelta(minutes=15)).isoformat()
+            _edb.set_reset_token(user["id"], token, expires_at)
+
+            # For now return token in API response since no email/SMS sender is wired yet
+            self._json(200, {
+                "status": "ok",
+                "msg": "Reset token generated.",
+                "reset_token": token, 
+                "expires_at": expires_at
+            })
+            return
+
+        elif self.path == "/reset-password":
+            p = self._body()
+            token = str(p.get("token") or "").strip()
+            new_password = str(p.get("new_password") or "")
+
+            if not token:
+                self._json(400, {"error": "Reset token is required."})
+                return
+
+            pw_err = _validate_password(new_password)
+            if pw_err:
+                self._json(400, {"error": pw_err})
+                return
+
+            ok = _edb.reset_password_with_token(token, _hash_password(new_password))
+            if not ok:
+                self._json(400, {"error": "Invalid or expired reset token."})
+                return
+
+            self._json(200, {"status":"ok", "msg":"Password reset successfully."})
+            return
+        
+        elif self.path == "/logout":
+            _current_user_id = None; self._json(200, {"status":"ok"}); return
+
+        # ── Extension routes (never touch _current_user_id) ───────────────────
+        if handle_post_extension(self, self.path, _wflow, _edb, _current_user_id):
+            return
+
+        elif self.path == "/upload":
+            if not _current_user_id:
+                self._json(400, {"error": "No active user. Create one in Setup."})
+                return
+            is_complete, missing_reason = is_min_profile_complete(_current_user_id)
+            if not is_complete:
+                self._json(400, {
+                    "ok": False,
+                    "error": "Complete basic classification profile before importing statements",
+                    "profile_required": True,
+                    "missing_reason": missing_reason,
+                })
+                return
+
+            ct = self.headers.get("Content-Type", "")
+            body = self._body_bytes()
+            parts = _parse_multipart(body, ct)
+            file_part = parts.get("file")
+
+            if not file_part:
+                self._json(400, {"error": "No file received"})
+                return
+
+            if isinstance(file_part, dict):
+                file_bytes = file_part.get("content", b"")
+                filename = file_part.get("filename", "")
+            else:
+                file_bytes = file_part
+                filename = ""
+
+            password = str(parts.get("password") or "").strip() or None
+
+            try:
+                parsed = parse_excel_statement(file_bytes, filename, password=password)
+                records = parsed.get("records", [])
+                opening_balance = parsed.get("opening_balance")
+                closing_balance = parsed.get("closing_balance")
+                statement_from_date = parsed.get("statement_from_date")
+                statement_to_date = parsed.get("statement_to_date")
+                print(f"[PERIOD PARSED] statement_from_date={statement_from_date} statement_to_date={statement_to_date}", flush=True)
+            except Exception as e:
+                self._json(400, {"error": f"Parse error: {e}"})
+                return
+
+            # Do not auto-write users.opening_balance from uploaded files.
+            # File-level opening balances are already stored in raw_import_batches
+            # and should be picked at report time based on selected account/period.
+            # Keep users.opening_balance only as a manual fallback set from Setup.
+
+            _wflow.discard_pending(_current_user_id)
+            account_id = str(parts.get("account_id") or "main").strip() or "main"
+
+            print(f"[UPLOAD] parse returned {len(records)} records for user={_current_user_id} account={account_id}")
+            if records:
+                print(f"[UPLOAD] First record sample: {records[0]}")
+
+            try:
+                print(f"[PERIOD STAGED] statement_from_date={statement_from_date} statement_to_date={statement_to_date}", flush=True)
+                res = _wflow.process_import_batch(
+                    user_id=_current_user_id,
+                    account_id=account_id,
+                    statement_type="bank_statement",
+                    file_name=filename,
+                    file_bytes=file_bytes,
+                    raw_records=records,
+                    statement_from_date=statement_from_date,
+                    statement_to_date=statement_to_date,
+                    opening_balance=opening_balance,
+                    closing_balance=closing_balance,
+                )
+                print(f"[UPLOAD] process_import_batch result: {res}")
+                pending = _wflow.get_pending_transactions(_current_user_id) or []
+                print(f"[UPLOAD] get_pending_transactions returned {len(pending)} rows")
+                res["transactions"] = pending
+                res["staged"] = res.get("staged", 0)
+                if opening_balance is not None:
+                    res["opening_balance"] = float(opening_balance)
+                self._json(200, res)
+            except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
+                print(f"[UPLOAD ERROR] {e}\n{tb}")
+                self._json(
+                    500,
+                    {
+                        "error": f"Classification/staging error: {e}",
+                        "detail": tb,
+                        "staged": 0,
+                        "transactions": [],
+                    },
+                )
+            return
+
+        elif self.path == "/classify":
+            if not _current_user_id:
+                self._json(400, {"error":"No active user."})
+                return
+            is_complete, missing_reason = is_min_profile_complete(_current_user_id)
+            if not is_complete:
+                self._json(400, {
+                    "ok": False,
+                    "error": "Complete basic classification profile before importing statements",
+                    "profile_required": True,
+                    "missing_reason": missing_reason,
+                })
+                return
+
+            p = self._body()
+            lines_raw = [l.strip() for l in (p.get("text","") or "").splitlines() if l.strip()]
+            amount = float(p.get("amount",0) or 0)
+            ttype = p.get("txn_type") or None
+
+            _wflow.discard_pending(_current_user_id)
+            results = []
+
+            for ln in lines_raw:
+                pending_row = _wflow.classify_and_stage(
+                    _current_user_id,
+                    narration=ln,
+                    amount=amount,
+                    txn_type=ttype,
+                    txn_date=datetime.now().strftime("%Y-%m-%d"),
+                )
+                results.append(pending_row or {})
+
+            self._json(200, results)
+
+        elif self.path == "/ledger":
+            if not _current_user_id: self._json(200, []); return
+            p = self._body()
+            rows = _db.get_txns(_current_user_id, limit=p.get("limit",500))
+            filtered = []
+            for r in rows:
+                if p.get("book") and r["book"] != p["book"]: continue
+                if p.get("txn_type") and r["txn_type"] != p["txn_type"]: continue
+                if p.get("search") and p["search"].upper() not in (r["narration"] or "").upper(): continue
+                if p.get("counterparty") and p["counterparty"].upper() not in (r.get("counterparty", "") or "").upper(): continue
+                filtered.append(dict(r))
+            self._json(200, filtered)
+
+        else:
+            self._text(404, "Not Found")
+
+
+# ── HNI Extension: user_type, review workflow, typed statements ───────────────
+from hni_ledger_extension import (
+    extend_db, ExtendedDBStore, ReviewWorkflow,
+    handle_get_extension, handle_post_extension,
+    is_min_profile_complete,
+)
+extend_db(_db)
+_edb   = ExtendedDBStore(_db)
+_wflow = ReviewWorkflow(_edb)
+# ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    import sys
-    if os.environ.get("RENDER") or os.environ.get("APP_ENV") == "production":
-        # Keep the existing Render startup command; replace the process with Gunicorn.
-        os.execv(sys.executable, [sys.executable, "-m", "gunicorn", "wsgi:app",
-            "--bind", "0.0.0.0:" + os.environ.get("PORT", "8082"),
-            "--workers", "1", "--threads", "2", "--timeout", "180"])
-    sys.modules.setdefault("hni_accounting_system", sys.modules[__name__])
-    from goldilocks.app import create_app
-    create_app().run(host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", 8082)), debug=False)
+    print("=" * 60)
+    print("  HNI LEDGER CLASSIFIER  —  3-Book Accounting Edition")
+    print("=" * 60)
+    print(f"  DB    : {DB_PATH}")
+    print()
+    print("  ACCOUNTING MODEL:")
+    print("  ✅ Bank debits = expenses ALREADY PAID → Expenditure")
+    print("  ✅ Liabilities = only outstanding amounts (loans, CC)")
+    print("  ✅ Balance Sheet = Assets / Liabilities / Equity")
+    print("  ✅ Book I: Income & Expenditure (P&L)")
+    print("  ✅ Book II: Balance Sheet (net worth)")
+    print("  ✅ Book III: Balance check")
+    print()
+
+    print("  Loading ML models …")
+    get_ml()
+    get_cl()
+
+    users = _db.get_users()
+    global _current_user_id
+    _current_user_id = None
+    print("  No active user. Please log in from Setup.")
+
+    port = int(os.environ.get("PORT", 8082))
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    print(f"\n  ✅ Server → http://0.0.0.0:{port}")
+    print("  Press Ctrl+C to stop\n")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.shutdown()
+        print("\n  Server stopped.")
 
 
 if __name__ == "__main__":

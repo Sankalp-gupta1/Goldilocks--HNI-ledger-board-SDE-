@@ -1,0 +1,27 @@
+# Requires paid compute and a persistent disk. Do not apply without reviewing cost.
+# New name deliberately avoids silently replacing the existing free service.
+services:
+  - type: web
+    name: goldilocks-ledger-persistent
+    runtime: docker
+    region: oregon
+    plan: 0.5c-512mb
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeployTrigger: checksPass
+    disk:
+      name: goldilocks-records
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: HNI_DATA_DIR
+        value: /var/data
+      - key: HNI_DB_PATH
+        value: /var/data/hni_ledger.db
+      - key: OMP_NUM_THREADS
+        value: '1'
+      - key: OPENBLAS_NUM_THREADS
+        value: '1'

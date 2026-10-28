@@ -35,3 +35,18 @@ venv/
 # IDE
 .vscode/
 .idea/
+
+# Private runtime state; never upload financial data or credentials.
+.venv*/
+data/
+*.db*
+*.joblib
+.env*
+!.env.example
+frontend/node_modules/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+__pycache__/
+.pytest_cache/
+*.pyc

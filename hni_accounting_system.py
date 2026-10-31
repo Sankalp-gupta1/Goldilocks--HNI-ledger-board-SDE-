@@ -7182,6 +7182,219 @@ pre#ledger-out{background:#0d1117;color:#e6edf3;padding:20px;border-radius:12px;
 #trace-modal-table th{background:#f5f7fa;padding:8px 10px;text-align:left;border-bottom:2px solid #e0e0e0;font-weight:800;color:#444;text-transform:uppercase;font-size:10px;letter-spacing:.4px}
 #trace-modal-table td{padding:7px 10px;border-bottom:1px solid #f1f3f5;vertical-align:top}
 #trace-modal-table tr:hover td{background:#f8faff}
+
+/* BANKING THEME — presentation only.
+   Keep the existing markup, dimensions, tab order, and JavaScript intact.
+   The legacy colour adapters below also cover content rendered after upload. */
+:root {
+  color-scheme: dark;
+  --bg: #202d3a;
+  --card: #293947;
+  --surface-raised: #304353;
+  --surface-inset: #22313f;
+  --border: #465a6b;
+  --text: #e7edf2;
+  --muted: #b2c0cc;
+  --subtle: #a4b4c2;
+  --gold: #d9bd87;
+  --blue: #b4cfe6;
+  --green: #a4d6bb;
+  --red: #f0b3b0;
+  --amber: #e5c48a;
+  --teal: #a2d3cc;
+  --info-bg: #2b4358;
+  --ok-bg: #29483e;
+  --error-bg: #513a40;
+  --warn-bg: #4d4435;
+  --violet-bg: #423e52;
+  --violet: #cdc2e4;
+  --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+}
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
+}
+::selection { background: #5f594b; color: #fff4df; }
+header {
+  background: linear-gradient(115deg, #2b3e4e, #243544);
+  box-shadow: inset 0 -1px 0 #556071, 0 3px 16px #14212c24;
+}
+header h1 { color: #f0e7d6; font-weight: 700; letter-spacing: .2px; }
+header .sub { color: #bfcdd8; opacity: 1; }
+.tabs { background: #253543; border-bottom-color: #3b5062; box-shadow: none; }
+.tab { color: var(--muted); font-weight: 600; transition: color .16s, background .16s; }
+.tab:hover { color: #f3e2bf; background: #354655; }
+.tab.active { color: var(--gold); border-bottom-color: var(--gold); background: #304251; }
+.card {
+  background: var(--card);
+  border-color: #405566;
+  border-radius: 14px;
+  box-shadow: 0 5px 18px #0b18251a, inset 0 1px 0 #ffffff04;
+  backdrop-filter: none;
+}
+.card h3 { color: #e8dfd0; border-bottom-color: #435564; font-weight: 650; }
+label { color: #bfccd6; font-weight: 650; letter-spacing: .55px; }
+input, select, textarea {
+  background: var(--surface-inset) !important;
+  color: var(--text) !important;
+  border-color: #526778 !important;
+  caret-color: var(--gold);
+  box-shadow: inset 0 1px 2px #0c1a281f;
+}
+input::placeholder, textarea::placeholder { color: #a2b1bf; opacity: 1; }
+input:focus, select:focus, textarea:focus {
+  border-color: var(--gold) !important;
+  background: #263847 !important;
+  box-shadow: 0 0 0 3px #d9bd871f;
+}
+input[type=checkbox], input[type=radio] { accent-color: var(--gold) !important; box-shadow: none; }
+option { background: #263847; color: var(--text); }
+a { color: #c0d9ef; text-underline-offset: 3px; }
+a:hover { color: #f0d4a3; }
+button { font-family: inherit; }
+.btn {
+  font-weight: 650;
+  border-radius: 8px;
+  letter-spacing: .2px;
+  box-shadow: 0 2px 5px #101e2b24;
+  transition: background .16s, border-color .16s, box-shadow .16s;
+}
+.btn:hover { transform: none; box-shadow: 0 3px 8px #101e2b33; }
+.bp { background: #d9bd87; color: #233343; }
+.bp:hover { background: #e4cb9f; }
+.bg { background: #386454; color: #edf7f0; }
+.bg:hover { background: #437763; }
+.bo { background: #304353; color: #d8e4ed; border-color: #6a8192; }
+.bo:hover { background: #3a5062; border-color: #9aaebc; }
+button:disabled, .btn:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; }
+button:focus-visible, .tab:focus-visible, a:focus-visible, [onclick]:focus-visible {
+  outline: 2px solid var(--gold); outline-offset: 3px;
+}
+.alert { border-radius: 8px; }
+.alert-info { background: var(--info-bg); color: #c5dcee; border-color: #89afcc; }
+.alert-ok { background: var(--ok-bg); color: #b9e5ca; border-color: #8cbda4; }
+.alert-err { background: var(--error-bg); color: #f3bfbc; border-color: #d99c99; }
+table { color: #dce6ed; font-variant-numeric: tabular-nums; }
+th { background: #324757; color: #ccd8e1; border-bottom-color: #526879; font-weight: 650; }
+td { border-bottom-color: #3b5060; }
+tr:hover td, #trace-modal-table tr:hover td { background: #344b5c; }
+.badge, .book-tag { font-weight: 650; border-radius: 5px; }
+.b-bs, .b-cr, .book-bs { background: var(--ok-bg); color: #b9e5ca; }
+.b-ie, .book-ie { background: var(--info-bg); color: #c4dcf0; }
+.b-cap, .book-cap { background: var(--warn-bg); color: #efd09b; }
+.b-sus, .book-sus { background: #4b3c4d; color: #e1b9d1; }
+.b-dr { background: var(--error-bg); color: #f4bfbc; }
+.drop-zone {
+  background: #253744;
+  border-color: #6a8191;
+  border-width: 1.5px;
+  color: #e1e9ee;
+  box-shadow: inset 0 0 0 4px #293947;
+}
+.drop-zone:hover, .drop-zone.dragover {
+  background: #304655; border-color: var(--gold);
+}
+.stat-card {
+  background: #2e4050; border-color: #465d6e;
+  border-radius: 10px; box-shadow: 0 3px 10px #12212c1a;
+}
+.stat-card .val { letter-spacing: -.35px; font-weight: 650; }
+.stat-card .lbl { color: #b7c6d2; }
+pre#ledger-out, #tcf-report-out {
+  background: #22313f !important; color: #d9e5ed !important;
+  border-color: #4a6070 !important; border-radius: 10px;
+}
+.section-head { background: #364e60; color: #ece1cc; }
+.section-body { border-color: #4a6070; }
+.grp-head { background: #304757; color: #d9e5ed; border-color: #455b6b; }
+.acct-head { background: #293d4c; color: #cddae3; border-color: #415766; }
+.acct-note { color: #aebfca; border-color: #415766; }
+#trace-modal-overlay { background: #111e2dcc; backdrop-filter: blur(3px); }
+#trace-modal { background: var(--card); border: 1px solid #637584; box-shadow: 0 18px 60px #07121d66; }
+#trace-modal-head { background: #344b5c; color: #f0e3c8; border-bottom: 1px solid #576b79; }
+#trace-modal-table th { background: #324757; color: #cbd8e1; border-color: #526879; }
+#trace-modal-table td { border-color: #415766; }
+.trace-chip { background: var(--info-bg); border-color: #617e94; color: #d2e3f0; }
+#active-user-banner { background: #2b493f !important; border-color: #5e8c76 !important; }
+#file-preview, #tcf-file-preview, #sys-out { background: #223543 !important; color: #d7e3eb; }
+#tab-login, #tab-create { border-bottom-color: var(--gold); }
+#review-empty, #stmt-empty, #tcf-empty { color: var(--muted) !important; }
+#_stock-modal-overlay > div { background: var(--card) !important; border: 1px solid #637584; }
+* { scrollbar-color: #6b8091 #23323f; scrollbar-width: thin; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; }
+}
+/* Retain the same navigation and form order on smaller screens. */
+@media (max-width: 1000px) {
+  .tabs { overflow-x: auto; }
+  .tab { flex-shrink: 0; white-space: nowrap; }
+}
+@media (max-width: 700px) {
+  header { padding-left: 16px; padding-right: 16px; }
+  header h1 { font-size: 20px; }
+  .tabs { padding-left: 8px; padding-right: 8px; }
+  .tab { padding-left: 14px; padding-right: 14px; }
+  .pane { padding: 18px 12px; }
+  .card { padding: 18px 16px; }
+  .drop-zone { padding-left: 18px; padding-right: 18px; }
+  input, select, textarea { max-width: 100%; }
+  [id$="-split"] > div { grid-template-columns: 1fr !important; }
+  #trace-modal { width: 96%; }
+}
+
+/* Legacy inline colours: these selectors style static and generated content
+   without changing render functions, event handlers, or stored data. */
+body :where([style*="color:#333;"],[style$="color:#333"],[style*="color: #333;"],[style$="color: #333"],[style*="color:rgb(51, 51, 51);"],[style$="color:rgb(51, 51, 51)"],[style*="color: rgb(51, 51, 51);"],[style$="color: rgb(51, 51, 51)"],[style*="color:#444;"],[style$="color:#444"],[style*="color: #444;"],[style$="color: #444"],[style*="color:rgb(68, 68, 68);"],[style$="color:rgb(68, 68, 68)"],[style*="color: rgb(68, 68, 68);"],[style$="color: rgb(68, 68, 68)"]) { color: var(--text) !important; }
+body :where([style*="color:#555;"],[style$="color:#555"],[style*="color: #555;"],[style$="color: #555"],[style*="color:rgb(85, 85, 85);"],[style$="color:rgb(85, 85, 85)"],[style*="color: rgb(85, 85, 85);"],[style$="color: rgb(85, 85, 85)"],[style*="color:#666;"],[style$="color:#666"],[style*="color: #666;"],[style$="color: #666"],[style*="color:rgb(102, 102, 102);"],[style$="color:rgb(102, 102, 102)"],[style*="color: rgb(102, 102, 102);"],[style$="color: rgb(102, 102, 102)"],[style*="color:#777;"],[style$="color:#777"],[style*="color: #777;"],[style$="color: #777"],[style*="color:rgb(119, 119, 119);"],[style$="color:rgb(119, 119, 119)"],[style*="color: rgb(119, 119, 119);"],[style$="color: rgb(119, 119, 119)"],[style*="color:#888;"],[style$="color:#888"],[style*="color: #888;"],[style$="color: #888"],[style*="color:rgb(136, 136, 136);"],[style$="color:rgb(136, 136, 136)"],[style*="color: rgb(136, 136, 136);"],[style$="color: rgb(136, 136, 136)"]) { color: var(--muted) !important; }
+body :where([style*="color:#999;"],[style$="color:#999"],[style*="color: #999;"],[style$="color: #999"],[style*="color:rgb(153, 153, 153);"],[style$="color:rgb(153, 153, 153)"],[style*="color: rgb(153, 153, 153);"],[style$="color: rgb(153, 153, 153)"],[style*="color:#aaa;"],[style$="color:#aaa"],[style*="color: #aaa;"],[style$="color: #aaa"],[style*="color:rgb(170, 170, 170);"],[style$="color:rgb(170, 170, 170)"],[style*="color: rgb(170, 170, 170);"],[style$="color: rgb(170, 170, 170)"],[style*="color:#bbb;"],[style$="color:#bbb"],[style*="color: #bbb;"],[style$="color: #bbb"],[style*="color:rgb(187, 187, 187);"],[style$="color:rgb(187, 187, 187)"],[style*="color: rgb(187, 187, 187);"],[style$="color: rgb(187, 187, 187)"],[style*="color:#ddd;"],[style$="color:#ddd"],[style*="color: #ddd;"],[style$="color: #ddd"],[style*="color:rgb(221, 221, 221);"],[style$="color:rgb(221, 221, 221)"],[style*="color: rgb(221, 221, 221);"],[style$="color: rgb(221, 221, 221)"]) { color: var(--subtle) !important; }
+body :where([style*="color:#1565c0;"],[style$="color:#1565c0"],[style*="color: #1565c0;"],[style$="color: #1565c0"],[style*="color:rgb(21, 101, 192);"],[style$="color:rgb(21, 101, 192)"],[style*="color: rgb(21, 101, 192);"],[style$="color: rgb(21, 101, 192)"],[style*="color:#0d47a1;"],[style$="color:#0d47a1"],[style*="color: #0d47a1;"],[style$="color: #0d47a1"],[style*="color:rgb(13, 71, 161);"],[style$="color:rgb(13, 71, 161)"],[style*="color: rgb(13, 71, 161);"],[style$="color: rgb(13, 71, 161)"],[style*="color:#4a6fa5;"],[style$="color:#4a6fa5"],[style*="color: #4a6fa5;"],[style$="color: #4a6fa5"],[style*="color:rgb(74, 111, 165);"],[style$="color:rgb(74, 111, 165)"],[style*="color: rgb(74, 111, 165);"],[style$="color: rgb(74, 111, 165)"]) { color: var(--blue) !important; }
+body :where([style*="color:#1b5e20;"],[style$="color:#1b5e20"],[style*="color: #1b5e20;"],[style$="color: #1b5e20"],[style*="color:rgb(27, 94, 32);"],[style$="color:rgb(27, 94, 32)"],[style*="color: rgb(27, 94, 32);"],[style$="color: rgb(27, 94, 32)"],[style*="color:#2e7d32;"],[style$="color:#2e7d32"],[style*="color: #2e7d32;"],[style$="color: #2e7d32"],[style*="color:rgb(46, 125, 50);"],[style$="color:rgb(46, 125, 50)"],[style*="color: rgb(46, 125, 50);"],[style$="color: rgb(46, 125, 50)"],[style*="color:green;"],[style$="color:green"],[style*="color: green;"],[style$="color: green"]) { color: var(--green) !important; }
+body :where([style*="color:#b71c1c;"],[style$="color:#b71c1c"],[style*="color: #b71c1c;"],[style$="color: #b71c1c"],[style*="color:rgb(183, 28, 28);"],[style$="color:rgb(183, 28, 28)"],[style*="color: rgb(183, 28, 28);"],[style$="color: rgb(183, 28, 28)"],[style*="color:#c62828;"],[style$="color:#c62828"],[style*="color: #c62828;"],[style$="color: #c62828"],[style*="color:rgb(198, 40, 40);"],[style$="color:rgb(198, 40, 40)"],[style*="color: rgb(198, 40, 40);"],[style$="color: rgb(198, 40, 40)"],[style*="color:#8b0000;"],[style$="color:#8b0000"],[style*="color: #8b0000;"],[style$="color: #8b0000"],[style*="color:rgb(139, 0, 0);"],[style$="color:rgb(139, 0, 0)"],[style*="color: rgb(139, 0, 0);"],[style$="color: rgb(139, 0, 0)"]) { color: var(--red) !important; }
+body :where([style*="color:#f57f17;"],[style$="color:#f57f17"],[style*="color: #f57f17;"],[style$="color: #f57f17"],[style*="color:rgb(245, 127, 23);"],[style$="color:rgb(245, 127, 23)"],[style*="color: rgb(245, 127, 23);"],[style$="color: rgb(245, 127, 23)"],[style*="color:#e65100;"],[style$="color:#e65100"],[style*="color: #e65100;"],[style$="color: #e65100"],[style*="color:rgb(230, 81, 0);"],[style$="color:rgb(230, 81, 0)"],[style*="color: rgb(230, 81, 0);"],[style$="color: rgb(230, 81, 0)"],[style*="color:#b26a00;"],[style$="color:#b26a00"],[style*="color: #b26a00;"],[style$="color: #b26a00"],[style*="color:rgb(178, 106, 0);"],[style$="color:rgb(178, 106, 0)"],[style*="color: rgb(178, 106, 0);"],[style$="color: rgb(178, 106, 0)"]) { color: var(--amber) !important; }
+body :where([style*="color:#6a1b9a;"],[style$="color:#6a1b9a"],[style*="color: #6a1b9a;"],[style$="color: #6a1b9a"],[style*="color:rgb(106, 27, 154);"],[style$="color:rgb(106, 27, 154)"],[style*="color: rgb(106, 27, 154);"],[style$="color: rgb(106, 27, 154)"],[style*="color:#7b1fa2;"],[style$="color:#7b1fa2"],[style*="color: #7b1fa2;"],[style$="color: #7b1fa2"],[style*="color:rgb(123, 31, 162);"],[style$="color:rgb(123, 31, 162)"],[style*="color: rgb(123, 31, 162);"],[style$="color: rgb(123, 31, 162)"],[style*="color:#880e4f;"],[style$="color:#880e4f"],[style*="color: #880e4f;"],[style$="color: #880e4f"],[style*="color:rgb(136, 14, 79);"],[style$="color:rgb(136, 14, 79)"],[style*="color: rgb(136, 14, 79);"],[style$="color: rgb(136, 14, 79)"]) { color: var(--violet) !important; }
+body :where([style*="background:#fff;"],[style$="background:#fff"],[style*="background: #fff;"],[style$="background: #fff"],[style*="background:rgb(255, 255, 255);"],[style$="background:rgb(255, 255, 255)"],[style*="background: rgb(255, 255, 255);"],[style$="background: rgb(255, 255, 255)"]) { background: var(--card) !important; }
+body :where([style*="background-color:#fff;"],[style$="background-color:#fff"],[style*="background-color: #fff;"],[style$="background-color: #fff"],[style*="background-color:rgb(255, 255, 255);"],[style$="background-color:rgb(255, 255, 255)"],[style*="background-color: rgb(255, 255, 255);"],[style$="background-color: rgb(255, 255, 255)"]) { background: var(--card) !important; }
+body :where([style*="background:#fafbff;"],[style$="background:#fafbff"],[style*="background: #fafbff;"],[style$="background: #fafbff"],[style*="background:rgb(250, 251, 255);"],[style$="background:rgb(250, 251, 255)"],[style*="background: rgb(250, 251, 255);"],[style$="background: rgb(250, 251, 255)"],[style*="background:#f9fff9;"],[style$="background:#f9fff9"],[style*="background: #f9fff9;"],[style$="background: #f9fff9"],[style*="background:rgb(249, 255, 249);"],[style$="background:rgb(249, 255, 249)"],[style*="background: rgb(249, 255, 249);"],[style$="background: rgb(249, 255, 249)"],[style*="background:#f5f7fa;"],[style$="background:#f5f7fa"],[style*="background: #f5f7fa;"],[style$="background: #f5f7fa"],[style*="background:rgb(245, 247, 250);"],[style$="background:rgb(245, 247, 250)"],[style*="background: rgb(245, 247, 250);"],[style$="background: rgb(245, 247, 250)"],[style*="background:#f8fafc;"],[style$="background:#f8fafc"],[style*="background: #f8fafc;"],[style$="background: #f8fafc"],[style*="background:rgb(248, 250, 252);"],[style$="background:rgb(248, 250, 252)"],[style*="background: rgb(248, 250, 252);"],[style$="background: rgb(248, 250, 252)"],[style*="background:#f5f5f5;"],[style$="background:#f5f5f5"],[style*="background: #f5f5f5;"],[style$="background: #f5f5f5"],[style*="background:rgb(245, 245, 245);"],[style$="background:rgb(245, 245, 245)"],[style*="background: rgb(245, 245, 245);"],[style$="background: rgb(245, 245, 245)"],[style*="background:#f0f0f0;"],[style$="background:#f0f0f0"],[style*="background: #f0f0f0;"],[style$="background: #f0f0f0"],[style*="background:rgb(240, 240, 240);"],[style$="background:rgb(240, 240, 240)"],[style*="background: rgb(240, 240, 240);"],[style$="background: rgb(240, 240, 240)"],[style*="background:#f3f3f3;"],[style$="background:#f3f3f3"],[style*="background: #f3f3f3;"],[style$="background: #f3f3f3"],[style*="background:rgb(243, 243, 243);"],[style$="background:rgb(243, 243, 243)"],[style*="background: rgb(243, 243, 243);"],[style$="background: rgb(243, 243, 243)"]) { background: var(--surface-inset) !important; }
+body :where([style*="background-color:#fafbff;"],[style$="background-color:#fafbff"],[style*="background-color: #fafbff;"],[style$="background-color: #fafbff"],[style*="background-color:rgb(250, 251, 255);"],[style$="background-color:rgb(250, 251, 255)"],[style*="background-color: rgb(250, 251, 255);"],[style$="background-color: rgb(250, 251, 255)"],[style*="background-color:#f9fff9;"],[style$="background-color:#f9fff9"],[style*="background-color: #f9fff9;"],[style$="background-color: #f9fff9"],[style*="background-color:rgb(249, 255, 249);"],[style$="background-color:rgb(249, 255, 249)"],[style*="background-color: rgb(249, 255, 249);"],[style$="background-color: rgb(249, 255, 249)"],[style*="background-color:#f5f7fa;"],[style$="background-color:#f5f7fa"],[style*="background-color: #f5f7fa;"],[style$="background-color: #f5f7fa"],[style*="background-color:rgb(245, 247, 250);"],[style$="background-color:rgb(245, 247, 250)"],[style*="background-color: rgb(245, 247, 250);"],[style$="background-color: rgb(245, 247, 250)"],[style*="background-color:#f8fafc;"],[style$="background-color:#f8fafc"],[style*="background-color: #f8fafc;"],[style$="background-color: #f8fafc"],[style*="background-color:rgb(248, 250, 252);"],[style$="background-color:rgb(248, 250, 252)"],[style*="background-color: rgb(248, 250, 252);"],[style$="background-color: rgb(248, 250, 252)"],[style*="background-color:#f5f5f5;"],[style$="background-color:#f5f5f5"],[style*="background-color: #f5f5f5;"],[style$="background-color: #f5f5f5"],[style*="background-color:rgb(245, 245, 245);"],[style$="background-color:rgb(245, 245, 245)"],[style*="background-color: rgb(245, 245, 245);"],[style$="background-color: rgb(245, 245, 245)"],[style*="background-color:#f0f0f0;"],[style$="background-color:#f0f0f0"],[style*="background-color: #f0f0f0;"],[style$="background-color: #f0f0f0"],[style*="background-color:rgb(240, 240, 240);"],[style$="background-color:rgb(240, 240, 240)"],[style*="background-color: rgb(240, 240, 240);"],[style$="background-color: rgb(240, 240, 240)"],[style*="background-color:#f3f3f3;"],[style$="background-color:#f3f3f3"],[style*="background-color: #f3f3f3;"],[style$="background-color: #f3f3f3"],[style*="background-color:rgb(243, 243, 243);"],[style$="background-color:rgb(243, 243, 243)"],[style*="background-color: rgb(243, 243, 243);"],[style$="background-color: rgb(243, 243, 243)"]) { background: var(--surface-inset) !important; }
+body :where([style*="background:#f9f9f9;"],[style$="background:#f9f9f9"],[style*="background: #f9f9f9;"],[style$="background: #f9f9f9"],[style*="background:rgb(249, 249, 249);"],[style$="background:rgb(249, 249, 249)"],[style*="background: rgb(249, 249, 249);"],[style$="background: rgb(249, 249, 249)"]) { background: var(--surface-raised) !important; }
+body :where([style*="background-color:#f9f9f9;"],[style$="background-color:#f9f9f9"],[style*="background-color: #f9f9f9;"],[style$="background-color: #f9f9f9"],[style*="background-color:rgb(249, 249, 249);"],[style$="background-color:rgb(249, 249, 249)"],[style*="background-color: rgb(249, 249, 249);"],[style$="background-color: rgb(249, 249, 249)"]) { background: var(--surface-raised) !important; }
+body :where([style*="background:#e3f2fd;"],[style$="background:#e3f2fd"],[style*="background: #e3f2fd;"],[style$="background: #e3f2fd"],[style*="background:rgb(227, 242, 253);"],[style$="background:rgb(227, 242, 253)"],[style*="background: rgb(227, 242, 253);"],[style$="background: rgb(227, 242, 253)"],[style*="background:#eef3ff;"],[style$="background:#eef3ff"],[style*="background: #eef3ff;"],[style$="background: #eef3ff"],[style*="background:rgb(238, 243, 255);"],[style$="background:rgb(238, 243, 255)"],[style*="background: rgb(238, 243, 255);"],[style$="background: rgb(238, 243, 255)"],[style*="background:#f0f4ff;"],[style$="background:#f0f4ff"],[style*="background: #f0f4ff;"],[style$="background: #f0f4ff"],[style*="background:rgb(240, 244, 255);"],[style$="background:rgb(240, 244, 255)"],[style*="background: rgb(240, 244, 255);"],[style$="background: rgb(240, 244, 255)"],[style*="background:#1565c0;"],[style$="background:#1565c0"],[style*="background: #1565c0;"],[style$="background: #1565c0"],[style*="background:rgb(21, 101, 192);"],[style$="background:rgb(21, 101, 192)"],[style*="background: rgb(21, 101, 192);"],[style$="background: rgb(21, 101, 192)"],[style*="background:#0d47a1;"],[style$="background:#0d47a1"],[style*="background: #0d47a1;"],[style$="background: #0d47a1"],[style*="background:rgb(13, 71, 161);"],[style$="background:rgb(13, 71, 161)"],[style*="background: rgb(13, 71, 161);"],[style$="background: rgb(13, 71, 161)"]) { background: var(--info-bg) !important; }
+body :where([style*="background-color:#e3f2fd;"],[style$="background-color:#e3f2fd"],[style*="background-color: #e3f2fd;"],[style$="background-color: #e3f2fd"],[style*="background-color:rgb(227, 242, 253);"],[style$="background-color:rgb(227, 242, 253)"],[style*="background-color: rgb(227, 242, 253);"],[style$="background-color: rgb(227, 242, 253)"],[style*="background-color:#eef3ff;"],[style$="background-color:#eef3ff"],[style*="background-color: #eef3ff;"],[style$="background-color: #eef3ff"],[style*="background-color:rgb(238, 243, 255);"],[style$="background-color:rgb(238, 243, 255)"],[style*="background-color: rgb(238, 243, 255);"],[style$="background-color: rgb(238, 243, 255)"],[style*="background-color:#f0f4ff;"],[style$="background-color:#f0f4ff"],[style*="background-color: #f0f4ff;"],[style$="background-color: #f0f4ff"],[style*="background-color:rgb(240, 244, 255);"],[style$="background-color:rgb(240, 244, 255)"],[style*="background-color: rgb(240, 244, 255);"],[style$="background-color: rgb(240, 244, 255)"],[style*="background-color:#1565c0;"],[style$="background-color:#1565c0"],[style*="background-color: #1565c0;"],[style$="background-color: #1565c0"],[style*="background-color:rgb(21, 101, 192);"],[style$="background-color:rgb(21, 101, 192)"],[style*="background-color: rgb(21, 101, 192);"],[style$="background-color: rgb(21, 101, 192)"],[style*="background-color:#0d47a1;"],[style$="background-color:#0d47a1"],[style*="background-color: #0d47a1;"],[style$="background-color: #0d47a1"],[style*="background-color:rgb(13, 71, 161);"],[style$="background-color:rgb(13, 71, 161)"],[style*="background-color: rgb(13, 71, 161);"],[style$="background-color: rgb(13, 71, 161)"]) { background: var(--info-bg) !important; }
+body :where([style*="background:#e8f5e9;"],[style$="background:#e8f5e9"],[style*="background: #e8f5e9;"],[style$="background: #e8f5e9"],[style*="background:rgb(232, 245, 233);"],[style$="background:rgb(232, 245, 233)"],[style*="background: rgb(232, 245, 233);"],[style$="background: rgb(232, 245, 233)"],[style*="background:#f0fff4;"],[style$="background:#f0fff4"],[style*="background: #f0fff4;"],[style$="background: #f0fff4"],[style*="background:rgb(240, 255, 244);"],[style$="background:rgb(240, 255, 244)"],[style*="background: rgb(240, 255, 244);"],[style$="background: rgb(240, 255, 244)"],[style*="background:#1b5e20;"],[style$="background:#1b5e20"],[style*="background: #1b5e20;"],[style$="background: #1b5e20"],[style*="background:rgb(27, 94, 32);"],[style$="background:rgb(27, 94, 32)"],[style*="background: rgb(27, 94, 32);"],[style$="background: rgb(27, 94, 32)"]) { background: var(--ok-bg) !important; }
+body :where([style*="background-color:#e8f5e9;"],[style$="background-color:#e8f5e9"],[style*="background-color: #e8f5e9;"],[style$="background-color: #e8f5e9"],[style*="background-color:rgb(232, 245, 233);"],[style$="background-color:rgb(232, 245, 233)"],[style*="background-color: rgb(232, 245, 233);"],[style$="background-color: rgb(232, 245, 233)"],[style*="background-color:#f0fff4;"],[style$="background-color:#f0fff4"],[style*="background-color: #f0fff4;"],[style$="background-color: #f0fff4"],[style*="background-color:rgb(240, 255, 244);"],[style$="background-color:rgb(240, 255, 244)"],[style*="background-color: rgb(240, 255, 244);"],[style$="background-color: rgb(240, 255, 244)"],[style*="background-color:#1b5e20;"],[style$="background-color:#1b5e20"],[style*="background-color: #1b5e20;"],[style$="background-color: #1b5e20"],[style*="background-color:rgb(27, 94, 32);"],[style$="background-color:rgb(27, 94, 32)"],[style*="background-color: rgb(27, 94, 32);"],[style$="background-color: rgb(27, 94, 32)"]) { background: var(--ok-bg) !important; }
+body :where([style*="background:#ffebee;"],[style$="background:#ffebee"],[style*="background: #ffebee;"],[style$="background: #ffebee"],[style*="background:rgb(255, 235, 238);"],[style$="background:rgb(255, 235, 238)"],[style*="background: rgb(255, 235, 238);"],[style$="background: rgb(255, 235, 238)"],[style*="background:#fce4ec;"],[style$="background:#fce4ec"],[style*="background: #fce4ec;"],[style$="background: #fce4ec"],[style*="background:rgb(252, 228, 236);"],[style$="background:rgb(252, 228, 236)"],[style*="background: rgb(252, 228, 236);"],[style$="background: rgb(252, 228, 236)"]) { background: var(--error-bg) !important; }
+body :where([style*="background-color:#ffebee;"],[style$="background-color:#ffebee"],[style*="background-color: #ffebee;"],[style$="background-color: #ffebee"],[style*="background-color:rgb(255, 235, 238);"],[style$="background-color:rgb(255, 235, 238)"],[style*="background-color: rgb(255, 235, 238);"],[style$="background-color: rgb(255, 235, 238)"],[style*="background-color:#fce4ec;"],[style$="background-color:#fce4ec"],[style*="background-color: #fce4ec;"],[style$="background-color: #fce4ec"],[style*="background-color:rgb(252, 228, 236);"],[style$="background-color:rgb(252, 228, 236)"],[style*="background-color: rgb(252, 228, 236);"],[style$="background-color: rgb(252, 228, 236)"]) { background: var(--error-bg) !important; }
+body :where([style*="background:#fff3e0;"],[style$="background:#fff3e0"],[style*="background: #fff3e0;"],[style$="background: #fff3e0"],[style*="background:rgb(255, 243, 224);"],[style$="background:rgb(255, 243, 224)"],[style*="background: rgb(255, 243, 224);"],[style$="background: rgb(255, 243, 224)"],[style*="background:#e65100;"],[style$="background:#e65100"],[style*="background: #e65100;"],[style$="background: #e65100"],[style*="background:rgb(230, 81, 0);"],[style$="background:rgb(230, 81, 0)"],[style*="background: rgb(230, 81, 0);"],[style$="background: rgb(230, 81, 0)"]) { background: var(--warn-bg) !important; }
+body :where([style*="background-color:#fff3e0;"],[style$="background-color:#fff3e0"],[style*="background-color: #fff3e0;"],[style$="background-color: #fff3e0"],[style*="background-color:rgb(255, 243, 224);"],[style$="background-color:rgb(255, 243, 224)"],[style*="background-color: rgb(255, 243, 224);"],[style$="background-color: rgb(255, 243, 224)"],[style*="background-color:#e65100;"],[style$="background-color:#e65100"],[style*="background-color: #e65100;"],[style$="background-color: #e65100"],[style*="background-color:rgb(230, 81, 0);"],[style$="background-color:rgb(230, 81, 0)"],[style*="background-color: rgb(230, 81, 0);"],[style$="background-color: rgb(230, 81, 0)"]) { background: var(--warn-bg) !important; }
+body :where([style*="background:#f3e5f5;"],[style$="background:#f3e5f5"],[style*="background: #f3e5f5;"],[style$="background: #f3e5f5"],[style*="background:rgb(243, 229, 245);"],[style$="background:rgb(243, 229, 245)"],[style*="background: rgb(243, 229, 245);"],[style$="background: rgb(243, 229, 245)"],[style*="background:#880e4f;"],[style$="background:#880e4f"],[style*="background: #880e4f;"],[style$="background: #880e4f"],[style*="background:rgb(136, 14, 79);"],[style$="background:rgb(136, 14, 79)"],[style*="background: rgb(136, 14, 79);"],[style$="background: rgb(136, 14, 79)"],[style*="background:#6a1b9a;"],[style$="background:#6a1b9a"],[style*="background: #6a1b9a;"],[style$="background: #6a1b9a"],[style*="background:rgb(106, 27, 154);"],[style$="background:rgb(106, 27, 154)"],[style*="background: rgb(106, 27, 154);"],[style$="background: rgb(106, 27, 154)"]) { background: var(--violet-bg) !important; }
+body :where([style*="background-color:#f3e5f5;"],[style$="background-color:#f3e5f5"],[style*="background-color: #f3e5f5;"],[style$="background-color: #f3e5f5"],[style*="background-color:rgb(243, 229, 245);"],[style$="background-color:rgb(243, 229, 245)"],[style*="background-color: rgb(243, 229, 245);"],[style$="background-color: rgb(243, 229, 245)"],[style*="background-color:#880e4f;"],[style$="background-color:#880e4f"],[style*="background-color: #880e4f;"],[style$="background-color: #880e4f"],[style*="background-color:rgb(136, 14, 79);"],[style$="background-color:rgb(136, 14, 79)"],[style*="background-color: rgb(136, 14, 79);"],[style$="background-color: rgb(136, 14, 79)"],[style*="background-color:#6a1b9a;"],[style$="background-color:#6a1b9a"],[style*="background-color: #6a1b9a;"],[style$="background-color: #6a1b9a"],[style*="background-color:rgb(106, 27, 154);"],[style$="background-color:rgb(106, 27, 154)"],[style*="background-color: rgb(106, 27, 154);"],[style$="background-color: rgb(106, 27, 154)"]) { background: var(--violet-bg) !important; }
+body :where([style*="background:#f57f17;"],[style$="background:#f57f17"],[style*="background: #f57f17;"],[style$="background: #f57f17"],[style*="background:rgb(245, 127, 23);"],[style$="background:rgb(245, 127, 23)"],[style*="background: rgb(245, 127, 23);"],[style$="background: rgb(245, 127, 23)"]) { background: var(--amber) !important; }
+body :where([style*="background-color:#f57f17;"],[style$="background-color:#f57f17"],[style*="background-color: #f57f17;"],[style$="background-color: #f57f17"],[style*="background-color:rgb(245, 127, 23);"],[style$="background-color:rgb(245, 127, 23)"],[style*="background-color: rgb(245, 127, 23);"],[style$="background-color: rgb(245, 127, 23)"]) { background: var(--amber) !important; }
+body :where([style*="border"][style*="#e0e0e0"],[style*="border"][style*="#eee"],[style*="border"][style*="#ddd"],[style*="border"][style*="#ccc"],[style*="border"][style*="#bbb"],[style*="border"][style*="#aaa"],[style*="border"][style*="#e8e8e8"],[style*="border"][style*="#eef1f5"],[style*="border"][style*="#f0f0f0"],[style*="border"][style*="#f5f5f5"],[style*="border"][style*="#d6d6d6"]) { border-color: var(--border) !important; }
+body :where([style*="border"][style*="#90caf9"],[style*="border"][style*="#bbdefb"],[style*="border"][style*="#e3f2fd"],[style*="border"][style*="#1565c0"]) { border-color: var(--blue) !important; }
+body :where([style*="border"][style*="#c8e6c9"],[style*="border"][style*="#a5d6a7"]) { border-color: var(--green) !important; }
+body :where([style*="border"][style*="#b71c1c"],[style*="border"][style*="#8b0000"],[style*="border"][style*="#ef9a9a"]) { border-color: var(--red) !important; }
+body :where([style*="border"][style*="#ffe0b2"],[style*="border"][style*="#ffb74d"],[style*="border"][style*="#f57f17"]) { border-color: var(--amber) !important; }
+body :where([style*="border"][style*="#ce93d8"],[style*="border"][style*="#7b1fa2"]) { border-color: var(--violet) !important; }
+
+/* Small action buttons generated inside statements and trace dialogs. */
+body button:where([style*="background:#1565c0"], [style*="background:#e65100"]) {
+  background: var(--gold) !important; color: #233343 !important;
+}
+body button:where([style*="background:#fff"]) { color: var(--text); }
+/* Preserve native white paper output when the browser's Print command is used. */
+@media print {
+  :root { color-scheme: light; }
+  body, .card, #trace-modal, .stat-card, pre#ledger-out, #tcf-report-out {
+    background: white !important; color: #17222b !important; box-shadow: none !important;
+  }
+  body [style], body td, body th { color: #17222b !important; background: transparent !important; border-color: #a6adb4 !important; }
+}
+/* END BANKING THEME */
+
 </style>
 </head>
 <!-- TRACE MODAL -->
